@@ -103,17 +103,11 @@ void confirmUpdate(String updateId) {
   HTTPClient http;
   String confirmURL = _confirm + updateId;
   Serial.println(confirmURL);
+  
   http.begin(confirmURL);
-  http.addHeader("Content-Type", "application/json");
 
-  DynamicJsonDocument doc(200);
-  doc["status"] = "updated";
-  doc["id"] = updateId;
-
-  String jsonData;
-  serializeJson(doc, jsonData);
-
-  int httpCode = http.POST(jsonData);
+  // Use GET em vez de POST
+  int httpCode = http.GET();
 
   if (httpCode == 200) {
     Serial.println("Confirmação de atualização enviada com sucesso.");
