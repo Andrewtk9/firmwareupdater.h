@@ -4,11 +4,16 @@
 #include <Update.h>
 #include <ArduinoJson.h>
 
-const char* _check;
+bool debugAtivo = false;
+const char* _site;
 const char* _upload;
 const char* _confirm;
 unsigned long _timing;
 String chipIdString;
+const char* CURRENT_VERSION;
+
+unsigned long tempoPing = 300000; // valor padrão
+String _updateId = "";
 
 void initChipId(){
   uint64_t chipid = ESP.getEfuseMac();
@@ -18,40 +23,57 @@ void initChipId(){
   
 }
 
-firmwareupdater::firmwareupdater(const char* check,const char* upload,const char* confirm){
-    _check = check;
-    _confirm = confirm;
-    _upload = upload;
+firmwareupdater::firmwareupdater(const char* site,const char* version){
+    _site = site;
+    CURRENT_VERSION = version;
 }
-
 
 String checkForUpdate() {
   Serial.println("Checando Atualização");
+
   HTTPClient http;
-  String CheckUpdate = _check + chipIdString;
+  String CheckUpdate = String(_site) + "atualizador/ping/" + chipIdString + "/" + CURRENT_VERSION;
+  Serial.println(CheckUpdate);
+
   http.begin(CheckUpdate);
   int httpCode = http.GET();
-  Serial.println(CheckUpdate);
-  if (httpCode == 200) { // Sucesso
+
+  if (httpCode == 200) {
     Serial.println("Ping Realizado");
     String payload = http.getString();
+
     DynamicJsonDocument doc(1024);
-    deserializeJson(doc, payload);
-    const char* status = doc["status"];
-    const char* updateId = doc["atualizar"];
-    Serial.print("Status: ");
-    Serial.println(status);
-    Serial.print("UpdateId: ");
-    Serial.println(updateId);
-    if (String(status) == "ok" && updateId != nullptr) {
-      Serial.printf("Atualização disponível com ID: %s\n", updateId);
-      http.end();
-      return String(updateId); // Retorna o ID da atualização
+    DeserializationError error = deserializeJson(doc, payload);
+
+    if (!error) {
+      const char* status = doc["status"];
+      debugAtivo = doc["debug"];
+      _timing = doc["tempoPing"] | _timing;  // fallback para 5 min se não vier
+      _updateId = doc["atualizar"] | "";
+
+      Serial.print("Status: ");
+      Serial.println(status);
+      Serial.print("UpdateId: ");
+      Serial.println(_updateId);
+      Serial.print("Debug: ");
+      Serial.println(debugAtivo ? "Ativo" : "Inativo");
+      Serial.print("TempoPing: ");
+      Serial.println(tempoPing);
+
+      if (String(status) == "ok" && _updateId != "") {
+        Serial.printf("Atualização disponível com ID: %s\n", _updateId.c_str());
+        http.end();
+        return _updateId;
+      }
+    } else {
+      Serial.print("Erro ao parsear JSON: ");
+      Serial.println(error.c_str());
     }
   }
+
   Serial.println("Check Finalizado");
   http.end();
-  return ""; // Retorna vazio se não houver atualização
+  return "";
 }
 
 bool performUpdate(String firmwareDownloadUrl) {
@@ -101,9 +123,8 @@ bool performUpdate(String firmwareDownloadUrl) {
 
 void confirmUpdate(String updateId) {
   HTTPClient http;
-  String confirmURL = _confirm + updateId;
+  String confirmURL = String(_site) + "atualizador/confirmarAtualizacao/" + updateId;
   Serial.println(confirmURL);
-  
   http.begin(confirmURL);
 
   // Use GET em vez de POST
@@ -119,6 +140,66 @@ void confirmUpdate(String updateId) {
 }
 
 
+void firmwareupdater::print(const String& msg, const char* arquivo, int linha, const char* funcao) {
+  Serial.println(msg);
+
+  if (debugAtivo) {
+    HTTPClient http;
+    http.begin(String(_site) + "debug-log");
+    http.addHeader("Content-Type", "application/json");
+
+    DynamicJsonDocument doc(512);
+    doc["codigo"] = chipIdString;
+    doc["mensagem"] = msg;
+    doc["arquivo"] = arquivo;
+    doc["linha"] = linha;
+    doc["funcao"] = funcao;
+
+    String requestBody;
+    serializeJson(doc, requestBody);
+
+    int httpCode = http.POST(requestBody);
+
+    if (httpCode > 0) {
+      Serial.printf("Debug enviado. Código HTTP: %d\n", httpCode);
+    } else {
+      Serial.printf("Erro ao enviar debug: %s\n", http.errorToString(httpCode).c_str());
+    }
+
+    http.end();
+  }
+}
+
+void firmwareupdater::println(const String& msg, const char* arquivo, int linha, const char* funcao) {
+  Serial.println(msg);
+
+  if (debugAtivo) {
+    HTTPClient http;
+    http.begin(String(_site) + "debug-log");
+    http.addHeader("Content-Type", "application/json");
+
+    DynamicJsonDocument doc(512);
+    doc["codigo"] = chipIdString;
+    doc["mensagem"] = msg +"\n" ;
+    doc["arquivo"] = arquivo;
+    doc["linha"] = linha;
+    doc["funcao"] = funcao;
+
+    String requestBody;
+    serializeJson(doc, requestBody);
+
+    int httpCode = http.POST(requestBody);
+
+    if (httpCode > 0) {
+      Serial.printf("Debug enviado. Código HTTP: %d\n", httpCode);
+    } else {
+      Serial.printf("Erro ao enviar debug: %s\n", http.errorToString(httpCode).c_str());
+    }
+
+    http.end();
+  }
+}
+
 void firmwareupdater::begin(unsigned long timing){
     _timing = timing;
     initChipId();
@@ -131,13 +212,13 @@ void firmwareupdater::loop(){
 
   if (millis() - lastCheck > _timing) {
     lastCheck = millis();
-
-    Serial.println("Verificando se há atualização disponível...");
+    
+    Serial.println("Verificando se há atualização disponível ou Ativação de Debug...");
     String updateId = checkForUpdate();
 
     if (updateId != "") { // Se recebeu um ID, faz o download e atualiza
       Serial.println("Nova atualização detectada. Iniciando download...");
-      String firmwareURL= _upload + updateId;
+      String firmwareURL= String(_site) + "atualizador/atualizar/" + updateId;
       Serial.println(firmwareURL);
       if (performUpdate(firmwareURL)) {
         Serial.println("Reiniciando após atualização...");
@@ -147,6 +228,9 @@ void firmwareupdater::loop(){
     } else {
       Serial.println("Nenhuma atualização disponível.");
     }
+  }
+  else{
+    return;
   }
   
 }
