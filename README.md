@@ -1,7 +1,7 @@
 
 # ESP32 Firmware Update Library
 
-**Version:** 1.0 (First Release)
+**Version:** 2.0 (Second Release)
 
 This library provides a straightforward way to manage firmware updates for ESP32 devices over a web service, using a three-step process. Designed for embedded systems, this library allows your ESP32 to check for, download, and confirm firmware updates seamlessly.
 
