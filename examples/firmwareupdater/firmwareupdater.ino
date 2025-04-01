@@ -1,10 +1,10 @@
 #include <firmwareupdater.h>
 #include <WiFi.h>
 
-const char* ssid = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+const char* ssid = "iot";
+const char* password = "IoT244466666";
 
-firmwareupdater firmUP("https://linkforupdates.com/","0.0.0");
+firmwareupdater firmUP("https://updater.plug.farm/","0.0.0");
 
 void setup() {
   Serial.begin(115200);
