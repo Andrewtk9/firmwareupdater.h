@@ -162,13 +162,26 @@ void firmwareupdater::print(const String& msg, const char* arquivo, int linha, c
 
     if (httpCode > 0) {
       Serial.printf("Debug enviado. Código HTTP: %d\n", httpCode);
+
+      // Novo trecho: processar a resposta JSON
+      String response = http.getString();
+      DynamicJsonDocument respDoc(256);
+      DeserializationError error = deserializeJson(respDoc, response);
+
+      if (!error && respDoc.containsKey("debug")) {
+        debugAtivo = respDoc["debug"];
+        Serial.print("Debug remoto atualizado: ");
+        Serial.println(debugAtivo ? "Ativo" : "Inativo");
+      }
+
     } else {
       Serial.printf("Erro ao enviar debug: %s\n", http.errorToString(httpCode).c_str());
     }
 
     http.end();
   }
-}
+  }
+
 
 void firmwareupdater::println(const String& msg, const char* arquivo, int linha, const char* funcao) {
   Serial.println(msg);
@@ -192,13 +205,25 @@ void firmwareupdater::println(const String& msg, const char* arquivo, int linha,
 
     if (httpCode > 0) {
       Serial.printf("Debug enviado. Código HTTP: %d\n", httpCode);
+
+      // Novo trecho: processar a resposta JSON
+      String response = http.getString();
+      DynamicJsonDocument respDoc(256);
+      DeserializationError error = deserializeJson(respDoc, response);
+
+      if (!error && respDoc.containsKey("debug")) {
+        debugAtivo = respDoc["debug"];
+        Serial.print("Debug remoto atualizado: ");
+        Serial.println(debugAtivo ? "Ativo" : "Inativo");
+      }
+
     } else {
       Serial.printf("Erro ao enviar debug: %s\n", http.errorToString(httpCode).c_str());
     }
 
     http.end();
   }
-}
+ }
 
 void firmwareupdater::begin(unsigned long timing){
     _timing = timing;
