@@ -1,0 +1,40 @@
+{
+  "name": "CampoDataFirmwareUpdater",
+  "version": "2.0.0",
+  "description": "Provisioning, ping, remote configuration and OTA updates for ESP32 devices over MQTT + HTTPS.",
+  "keywords": "ota, mqtt, esp32, firmware, update, gprs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Andrewtk9/firmwareupdater.git"
+  },
+  "authors": [
+    {
+      "name": "André Victor de Oliveira Barros dos Santos",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": ["arduino", "espidf"],
+  "platforms": ["espressif32", "native"],
+  "headers": ["campodata/FirmwareUpdater.h"],
+  "dependencies": [
+    {
+      "owner": "bblanchon",
+      "name": "ArduinoJson",
+      "version": "^7.0.0"
+    }
+  ],
+  "build": {
+    "flags": ["-std=gnu++17", "-I include", "-I src"],
+    "srcFilter": [
+      "+<core/>",
+      "+<platform/>",
+      "+<protocol/>",
+      "+<FirmwareUpdater.cpp>"
+    ],
+    "unflags": ["-std=gnu++11"]
+  },
+  "export": {
+    "exclude": [".pio", "test", "tools", "docs"]
+  }
+}

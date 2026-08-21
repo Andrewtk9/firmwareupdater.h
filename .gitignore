@@ -1,0 +1,32 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+
+# Build output
+*.o
+*.a
+*.elf
+*.bin
+*.map
+*.su
+build/
+target/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local deployment values: hosts, credentials and endpoints belong to the
+# project that consumes this library, never to the library itself.
+# Copy fwup_secrets.example.h and fill it in locally.
+fwup_secrets.h
+*.local.h
+.env
+.env.*
+!.env.example
