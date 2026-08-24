@@ -14,9 +14,17 @@
     }
   ],
   "license": "MIT",
-  "frameworks": ["arduino", "espidf"],
-  "platforms": ["espressif32", "native"],
-  "headers": ["campodata/FirmwareUpdater.h"],
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": [
+    "espressif32",
+    "native"
+  ],
+  "headers": [
+    "campodata/FirmwareUpdater.h"
+  ],
   "dependencies": [
     {
       "owner": "bblanchon",
@@ -25,16 +33,27 @@
     }
   ],
   "build": {
-    "flags": ["-std=gnu++17", "-I include", "-I src"],
+    "flags": [
+      "-std=gnu++17",
+      "-I include",
+      "-I src"
+    ],
     "srcFilter": [
       "+<core/>",
       "+<platform/>",
       "+<protocol/>",
       "+<FirmwareUpdater.cpp>"
     ],
-    "unflags": ["-std=gnu++11"]
+    "unflags": [
+      "-std=gnu++11"
+    ]
   },
   "export": {
-    "exclude": [".pio", "test", "tools", "docs"]
+    "exclude": [
+      ".pio",
+      "test",
+      "tools",
+      "docs"
+    ]
   }
 }

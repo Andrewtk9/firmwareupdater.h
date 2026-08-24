@@ -91,7 +91,8 @@ struct FirmwareUpdater::Impl {
     Config          cfg;
     Esp32Nvs        nvs;
     Esp32HttpClient http;
-    EspMqttClient   mqtt;
+    EspMqttClient mqtt_esp;
+    IMqttClient*  mqtt = &mqtt_esp;
     Esp32OtaSink    ota;
     ArduinoClock    clock;
     TopicResolver   topics;
@@ -215,7 +216,7 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     // The deployed download endpoint returns the whole image, so resume is not
     // available. Reported rather than assumed.
     d.caps.range_supported      = false;
-    d.caps.mqtt_max_publish_qos = d.mqtt.maxPublishQos();
+    d.caps.mqtt_max_publish_qos = d.mqtt->maxPublishQos();
     d.caps.tier                 = 1;
 
     FWUP_LOGI("board", "%s  board_id=%s", d.hardware_model, d.board_id);
@@ -423,20 +424,20 @@ static void applySubscriptions(FirmwareUpdater::Impl& d) {
     // e simplesmente nunca recebe ordem. Registrar cada uma e o unico jeito de
     // enxergar isso.
     FWUP_LOGI("mqtt", "assinando %s (qos 1)", d.topics.update());
-    d.mqtt.subscribe(d.topics.update(), 1);
+    d.mqtt->subscribe(d.topics.update(), 1);
     FWUP_LOGI("mqtt", "assinando %s (qos 1)", d.topics.config());
-    d.mqtt.subscribe(d.topics.config(), 1);
+    d.mqtt->subscribe(d.topics.config(), 1);
 
     for (size_t i = 0; i < d.subs_count; ++i) {
         FWUP_LOGI("mqtt", "assinando %s (qos %u) [projeto]", d.subs[i], d.subs_qos[i]);
-        d.mqtt.subscribe(d.subs[i], d.subs_qos[i]);
+        d.mqtt->subscribe(d.subs[i], d.subs_qos[i]);
     }
 }
 
 static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     if (!d.store->isProvisioned() || !d.topics.ready()) return;
 
-    const bool up = d.mqtt.connected();
+    const bool up = d.mqtt->connected();
 
     if (up && !d.was_connected) {
         d.was_connected = true;
@@ -498,10 +499,10 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     // The library's own topics always go through the queue, so the OTA state
     // machine never runs on the MQTT task whatever the project chose.
-    d.mqtt.reserveTopic(d.topics.update());
-    d.mqtt.reserveTopic(d.topics.config());
+    d.mqtt->reserveTopic(d.topics.update());
+    d.mqtt->reserveTopic(d.topics.config());
     if (d.cfg.mqtt.dispatch == DispatchMode::Async) {
-        d.mqtt.setDirectCallback(directMessage, &d);
+        d.mqtt->setDirectCallback(directMessage, &d);
     }
 
     FWUP_LOGI("mqtt", "conectando %s:%u tls=%s usuario=%s",
@@ -515,12 +516,11 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     // Pular a verificacao nao e alternativa porque CONFIG_ESP_TLS_INSECURE vem
     // desligado no framework.
     if (s.tls && !s.verify_ca && s.ca_pem == nullptr) {
-        FWUP_LOGE("mqtt", "TLS pedido sem CA e sem verificacao: o esp-tls vai "
-                          "recusar. Informe cfg.mqtt.ca_pem ou use "
-                          "TlsMode::ForcePlain.");
+        FWUP_LOGW("mqtt", "TLS sem validar certificado: cifrado, porem sem "
+                          "autenticar o servidor");
     }
 
-    if (d.mqtt.begin(s)) {
+    if (d.mqtt->begin(s)) {
         d.mqtt_started = true;
     } else {
         d.mqtt_backoff.fail(now);
@@ -537,7 +537,7 @@ static void ingestStep(FirmwareUpdater::Impl& d) {
     uint8_t buf[kOtaChunkBuffer];
     size_t  len = 0;
 
-    while (d.mqtt.poll(topic, sizeof(topic), buf, sizeof(buf) - 1, len)) {
+    while (d.mqtt->poll(topic, sizeof(topic), buf, sizeof(buf) - 1, len)) {
         buf[len] = '\0';
         const char* text = reinterpret_cast<const char*>(buf);
 
@@ -861,7 +861,7 @@ static void confirmStep(FirmwareUpdater::Impl& d, uint32_t now) {
 // ------------------------------------------------------------------ ping ---
 
 static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
-    if (!d.mqtt.connected() || !d.topics.ready()) return;
+    if (!d.mqtt->connected() || !d.topics.ready()) return;
 
     const uint32_t interval = static_cast<uint32_t>(d.remote_cfg.ping_interval_s) * 1000u;
     if (d.last_ping_ms != 0 && (now - d.last_ping_ms) < interval) return;
@@ -889,13 +889,13 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
     s.config_version   = d.store->configVersion();
     s.hardware_model   = d.hardware_model;
     s.pub_qos          = d.caps.mqtt_max_publish_qos;
-    s.mqtt_dropped     = d.mqtt.dropped();
+    s.mqtt_dropped     = d.mqtt->dropped();
 
     char out[kPingScratch] = {};
     const bool dual = (d.cfg.link_mode == LinkMode::Both);
     if (d.ping_builder.build(s, dual, out, sizeof(out)) != CodecError::Ok) return;
 
-    const bool ok = d.mqtt.publish(d.topics.ping(),
+    const bool ok = d.mqtt->publish(d.topics.ping(),
                                    reinterpret_cast<const uint8_t*>(out),
                                    strlen(out), 1, false);
     if (ok) {
@@ -977,7 +977,7 @@ bool FirmwareUpdater::canSleep() const {
 
 // ------------------------------------------------------------------ mqtt ---
 
-bool FirmwareUpdater::mqttConnected() const { return _impl->mqtt.connected(); }
+bool FirmwareUpdater::mqttConnected() const { return _impl->mqtt->connected(); }
 MqttStatus FirmwareUpdater::mqttStatus() const { return _impl->mqtt_status; }
 const char* FirmwareUpdater::clientId() const { return _impl->client_id; }
 
@@ -986,7 +986,7 @@ bool FirmwareUpdater::publish(const char* topic, const uint8_t* payload, size_t 
     Impl& d = *_impl;
     if (topic == nullptr) return false;
 
-    if (!d.mqtt.connected()) {
+    if (!d.mqtt->connected()) {
         d.mqtt_status = MqttStatus::NotConnected;
         FWUP_LOGW("mqtt", "publish em %s descartado: offline", topic);
         return false;
@@ -1008,7 +1008,7 @@ bool FirmwareUpdater::publish(const char* topic, const uint8_t* payload, size_t 
         d.mqtt_status = MqttStatus::Ok;
     }
 
-    const bool ok = d.mqtt.publish(topic, payload, len, effective, retain);
+    const bool ok = d.mqtt->publish(topic, payload, len, effective, retain);
     if (!ok) {
         if (d.mqtt_status == MqttStatus::Ok) d.mqtt_status = MqttStatus::Failed;
         FWUP_LOGE("mqtt", "publish em %s falhou (%u bytes)", topic, (unsigned)len);
@@ -1048,7 +1048,7 @@ bool FirmwareUpdater::subscribe(const char* topic, uint8_t qos) {
         }
     }
 
-    return d.mqtt.connected() ? d.mqtt.subscribe(topic, qos) : true;
+    return d.mqtt->connected() ? d.mqtt->subscribe(topic, qos) : true;
 }
 
 bool FirmwareUpdater::subscribe(const String& topic, uint8_t qos) {

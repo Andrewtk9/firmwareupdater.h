@@ -6,6 +6,30 @@
 // exported from libmbedtls.a, so the prototype is declared here instead of
 // forcing every consuming project to add the directory to build_flags.
 extern "C" esp_err_t esp_crt_bundle_attach(void* conf);
+
+#include <mbedtls/ssl.h>
+
+namespace {
+
+// Aceita o certificado do servidor sem validar, para brokers cuja cadeia nao
+// pode ser verificada.
+//
+// esp-tls recusa iniciar sem nenhuma ancora de confianca, e a opcao de
+// dispensa-la nao existe: CONFIG_ESP_TLS_INSECURE vem desligado no framework
+// pre-compilado. Mas o campo crt_bundle_attach da config recebe justamente o
+// mbedtls_ssl_config, e e chamado depois de o esp-tls ter posto
+// VERIFY_REQUIRED. Preencher esse ponteiro satisfaz a checagem de "tem ancora"
+// e permite baixar o modo em seguida - a mesma coisa que o setInsecure() do
+// WiFiClientSecure faz, so que por dentro do esp-mqtt, preservando QoS 1.
+extern "C" esp_err_t fwupTlsNoVerify(void* conf) {
+    if (conf != nullptr) {
+        mbedtls_ssl_conf_authmode(static_cast<mbedtls_ssl_config*>(conf),
+                                  MBEDTLS_SSL_VERIFY_NONE);
+    }
+    return ESP_OK;
+}
+
+}  // namespace
 #include <stdio.h>
 #include <string.h>
 
@@ -42,12 +66,19 @@ bool EspMqttClient::begin(const MqttSessionConfig& cfg) {
 
     if (cfg.tls) {
         if (cfg.ca_pem != nullptr) {
+            // Ancora informada pelo projeto: validacao de verdade.
             mc.cert_pem = cfg.ca_pem;
         } else if (cfg.verify_ca) {
-            // Validates against the CA bundle compiled into the framework, so
-            // no certificate has to be embedded.
+            // Valida contra o bundle de CAs ja compilado no framework, sem
+            // precisar embutir certificado nenhum.
             mc.crt_bundle_attach = esp_crt_bundle_attach;
+        } else {
+            // Sem ancora e sem validar: cifra, mas nao autentica.
+            mc.crt_bundle_attach = fwupTlsNoVerify;
         }
+
+        // O certificado do broker pode ter CN que nao corresponde ao host.
+        mc.skip_cert_common_name_check = true;
     }
 
     _client = esp_mqtt_client_init(&mc);
