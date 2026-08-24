@@ -33,6 +33,8 @@ extern "C" esp_err_t fwupTlsNoVerify(void* conf) {
 #include <stdio.h>
 #include <string.h>
 
+#include "core/Log.h"
+
 namespace campodata {
 
 EspMqttClient::~EspMqttClient() {
@@ -196,6 +198,36 @@ void EspMqttClient::handle(esp_mqtt_event_handle_t event) {
             _connected  = false;
             _assembling = false;
             break;
+
+        // Sem isto uma credencial recusada e indistinguivel de rede ruim: o
+        // esp-mqtt reconecta sozinho e o dispositivo fica tentando em silencio.
+        case MQTT_EVENT_ERROR: {
+            const esp_mqtt_error_codes_t* e = event->error_handle;
+            if (e == nullptr) break;
+
+            if (e->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+                const char* motivo = "recusado";
+                switch (e->connect_return_code) {
+                    case MQTT_CONNECTION_REFUSE_PROTOCOL:
+                        motivo = "versao de protocolo recusada"; break;
+                    case MQTT_CONNECTION_REFUSE_ID_REJECTED:
+                        motivo = "client id rejeitado"; break;
+                    case MQTT_CONNECTION_REFUSE_SERVER_UNAVAILABLE:
+                        motivo = "servidor indisponivel"; break;
+                    case MQTT_CONNECTION_REFUSE_BAD_USERNAME:
+                        motivo = "usuario ou senha invalidos"; break;
+                    case MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED:
+                        motivo = "nao autorizado"; break;
+                    default: break;
+                }
+                FWUP_LOGE("mqtt", "conexao recusada pelo broker: %s", motivo);
+            } else {
+                FWUP_LOGE("mqtt", "erro de transporte: tls=0x%x pilha=0x%x sock=%d",
+                          e->esp_tls_last_esp_err, e->esp_tls_stack_err,
+                          e->esp_transport_sock_errno);
+            }
+            break;
+        }
 
         case MQTT_EVENT_DATA: {
             const bool fragmented = event->total_data_len > event->data_len;
