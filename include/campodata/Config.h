@@ -68,7 +68,25 @@ enum class DispatchMode : uint8_t {
 // the provisioning response and are persisted to NVS - the library never needs
 // them compiled in. What is left here is what the server does not send: the
 // trust anchor and the client-side timing knobs.
+// Como decidir se a sessao usa TLS.
+//
+// O normal e obedecer o provisionamento. As duas forcas existem porque o
+// esp-tls do Arduino nao consegue "TLS sem verificar": a opcao de pular a
+// verificacao foi compilada para fora (CONFIG_ESP_TLS_INSECURE desligado).
+// Entao um broker com certificado invalido ou vencido so aceita duas saidas:
+// fixar o certificado em ca_pem, ou cair para texto claro.
+enum class TlsMode : uint8_t {
+    FromProvisioning,  // usa o que o servidor mandou
+    ForcePlain,        // ignora o TLS do provisionamento e conecta em claro
+    ForceTls,          // exige TLS mesmo que o provisionamento diga o contrario
+};
+
 struct MqttTuning {
+    TlsMode tls_mode = TlsMode::FromProvisioning;
+
+    // Porta usada quando ForcePlain troca a porta TLS do provisionamento.
+    uint16_t plain_port = 1883;
+
     // Async matches the AsyncMqttClient behaviour the projects already expect.
     // The library's own three topics are always handled internally on the main
     // loop regardless of this setting, so OTA is never driven from the MQTT

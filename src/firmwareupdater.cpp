@@ -466,9 +466,19 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     }
 
     MqttSessionConfig s;
-    s.host      = host;
-    s.port      = port;
-    s.tls       = (port == 8883);
+    s.host = host;
+    s.port = port;
+    s.tls  = (port == 8883);
+
+    if (d.cfg.mqtt.tls_mode == TlsMode::ForcePlain && s.tls) {
+        FWUP_LOGW("mqtt", "TLS desativado por configuracao: %u -> %u em texto claro",
+                  port, d.cfg.mqtt.plain_port);
+        s.tls  = false;
+        s.port = d.cfg.mqtt.plain_port;
+    } else if (d.cfg.mqtt.tls_mode == TlsMode::ForceTls) {
+        s.tls = true;
+    }
+
     s.verify_ca = d.cfg.mqtt.verify_ca;
     s.ca_pem    = d.cfg.mqtt.ca_pem;
     s.username  = user;
@@ -500,9 +510,14 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     // Vale dizer em voz alta: cifrado nao e o mesmo que autenticado. Sem
     // verificar o certificado, o trafego viaja protegido de quem so escuta,
     // mas nada garante que do outro lado esta o broker certo.
+    // O esp-tls do Arduino recusa subir sem nenhuma opcao de verificacao: sem
+    // CA, sem bundle e sem PSK ele devolve ESP_ERR_MBEDTLS_SSL_SETUP_FAILED.
+    // Pular a verificacao nao e alternativa porque CONFIG_ESP_TLS_INSECURE vem
+    // desligado no framework.
     if (s.tls && !s.verify_ca && s.ca_pem == nullptr) {
-        FWUP_LOGW("mqtt", "TLS sem verificar certificado: cifrado, porem sem "
-                          "autenticar o servidor");
+        FWUP_LOGE("mqtt", "TLS pedido sem CA e sem verificacao: o esp-tls vai "
+                          "recusar. Informe cfg.mqtt.ca_pem ou use "
+                          "TlsMode::ForcePlain.");
     }
 
     if (d.mqtt.begin(s)) {
