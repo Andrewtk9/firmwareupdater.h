@@ -130,16 +130,13 @@ public:
     void onMqttConnect(MqttEventCb cb, void* ctx);
     void onMqttDisconnect(MqttEventCb cb, void* ctx);
 
-    // Builds an application topic under the device's provisioned namespace:
-    // the spec's path first, the project's own segments after it.
+    // Builds an application topic in the project's own namespace, isolated by
+    // device_id - the same pair provisioning grants in the ACL:
     //
-    //     /ping/<device_id>/dados
-    //     |________________|_____ spec
-    //                       \____ project
+    //     medidor-potencia-ac/<device_id>/ret
     //
-    // A suffix is required: without one this would be the ping topic itself,
-    // whose payload the spec defines. One ACL rule over the device's subtree
-    // then covers everything it publishes.
+    // The project name is the last segment of `repo`. Empty until the device is
+    // provisioned, since the device_id comes from the server.
     bool appTopic(const char* suffix, char* out, size_t cap) const;
 
     // ---------------------------------------------------------- callbacks --

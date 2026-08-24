@@ -1086,25 +1086,34 @@ bool FirmwareUpdater::unsubscribe(const char* topic) {
     return true;
 }
 
+// Nome do projeto a partir do repo: campotech/medidor-potencia-ac devolve
+// medidor-potencia-ac. Tem de bater exatamente com a derivacao que o servidor
+// faz ao gravar a ACL, senao o topico publicado nao e o topico liberado.
+static const char* projectName(const char* repo) {
+    if (repo == nullptr || repo[0] == ' ') return nullptr;
+    const char* barra = strrchr(repo, '/');
+    const char* nome  = (barra != nullptr) ? barra + 1 : repo;
+    return nome[0] != ' ' ? nome : nullptr;
+}
+
 bool FirmwareUpdater::appTopic(const char* suffix, char* out, size_t cap) const {
     Impl& d = *_impl;
     if (out == nullptr || cap == 0) return false;
 
-    // Pendura no caminho que o provisionamento entregou, em vez de comecar por
-    // um prefixo proprio: o padrao da especificacao vem primeiro e o que e do
-    // projeto vem depois dele. Assim uma unica regra de ACL sobre a subarvore
-    // do dispositivo cobre tudo o que ele publica, sem precisar liberar
-    // namespace novo a cada projeto.
-    const char* base = d.topics.ping();
-    if (base == nullptr || base[0] == ' ') return false;
+    // Namespace do projeto, isolado por device_id - o mesmo par que o
+    // provisionamento libera na ACL:
+    //
+    //     medidor-potencia-ac/<device_id>/ret
+    //
+    // O device_id vem do servidor, entao antes de provisionar nao ha topico.
+    const char* projeto = projectName(d.cfg.repo);
+    if (projeto == nullptr || d.device_id[0] == ' ') return false;
 
-    // Sem sufixo seria o proprio topico de ping, cuja carga a especificacao
-    // define: publicar dados do projeto ali confundiria o servidor.
-    if (suffix == nullptr || suffix[0] == ' ') return false;
+    while (suffix != nullptr && *suffix == '/') ++suffix;
 
-    while (*suffix == '/') ++suffix;
-
-    const int n = snprintf(out, cap, "%s/%s", base, suffix);
+    const int n = (suffix == nullptr || suffix[0] == ' ')
+                      ? snprintf(out, cap, "%s/%s", projeto, d.device_id)
+                      : snprintf(out, cap, "%s/%s/%s", projeto, d.device_id, suffix);
     return n > 0 && static_cast<size_t>(n) < cap;
 }
 
