@@ -56,6 +56,13 @@ bool linkUp() {
     return WiFi.status() == WL_CONNECTED;
 }
 
+// A pilha so consegue resolver nome com servidor DNS configurado. Checar antes
+// evita abrir uma sessao TLS - que aloca dezenas de KB de heap - so para
+// descobrir que o nome nao vira IP.
+bool dnsReady() {
+    return WiFi.status() == WL_CONNECTED && WiFi.dnsIP() != IPAddress(0, 0, 0, 0);
+}
+
 // Nome que nao resolve e quase sempre rede sem DNS, nao problema do servidor.
 // Um DNS em 0.0.0.0 significa que o DHCP nao entregou nenhum, e ai nenhuma
 // chamada por nome vai funcionar - nem NTP, nem HTTPS.
@@ -113,7 +120,11 @@ struct FirmwareUpdater::Impl {
 
     RemoteConfig remote_cfg;
 
+    // Negacao e falha de rede pedem ritmos diferentes: um 403 espera alguem no
+    // painel, uma rede instavel volta sozinha em segundos.
     Backoff  provision_backoff;
+    Backoff  transport_backoff;
+    bool     warned_no_dns = false;
     Backoff  mqtt_backoff;
     Backoff  confirm_backoff;
     uint32_t last_ping_ms  = 0;
@@ -265,6 +276,7 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
 
     d.provision_backoff.configure(backoff::kProvisionDenied,
                                   backoff::kProvisionDeniedCount);
+    d.transport_backoff.configure(backoff::kNetwork, backoff::kNetworkCount);
     d.mqtt_backoff.configure(backoff::kMqtt, backoff::kMqttCount);
     d.confirm_backoff.configure(backoff::kConfirm, backoff::kConfirmCount);
 
@@ -294,7 +306,25 @@ static bool apiBase(FirmwareUpdater::Impl& d, char* out, size_t cap) {
 }
 
 static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
-    if (!linkUp() || !d.provision_backoff.ready(now)) return;
+    if (!linkUp()) return;
+
+    // Sem DNS a requisicao nao tem como chegar a lugar nenhum, entao nem sai.
+    // O aviso sai uma vez por queda, e nao a cada volta do loop.
+    if (!dnsReady()) {
+        if (!d.warned_no_dns) {
+            d.warned_no_dns = true;
+            FWUP_LOGE("prov", "adiado: rede sem DNS, o nome do servidor nao "
+                              "tem como ser resolvido");
+            logNetwork();
+        }
+        return;
+    }
+    if (d.warned_no_dns) {
+        d.warned_no_dns = false;
+        FWUP_LOGI("prov", "DNS disponivel, retomando");
+    }
+
+    if (!d.provision_backoff.ready(now) || !d.transport_backoff.ready(now)) return;
 
     char base[128] = {};
     if (!apiBase(d, base, sizeof(base))) return;
@@ -321,13 +351,14 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     HttpResponse res;
     const HttpError herr = d.http.postJson(url, body, d.scratch, kJsonScratch, res);
     if (herr != HttpError::Ok) {
-        d.provision_backoff.fail(now);
+        // Rede, e nao recusa: volta rapido em vez de esperar o backoff longo.
+        d.transport_backoff.fail(now);
         FWUP_LOGE("prov", "nao alcancou o servidor (%s), nova tentativa em %u ms",
-                  toString(herr), d.provision_backoff.currentDelayMs());
-        // Nome nao resolvido costuma ser rede sem DNS, e nao problema da API.
+                  toString(herr), d.transport_backoff.currentDelayMs());
         logNetwork();
         return;
     }
+    d.transport_backoff.reset();
 
     const ProvisionOutcome outcome = provisioning::fromHttpStatus(res.status);
     if (outcome != ProvisionOutcome::Granted) {
@@ -404,6 +435,11 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     }
 
     if (up || !linkUp()) return;
+
+    // O broker tambem e alcancado por nome: sem DNS a sessao nao teria como
+    // subir, e esp-mqtt ficaria reciclando socket sozinho na propria task.
+    if (!dnsReady()) return;
+
     if (d.mqtt_started || !d.mqtt_backoff.ready(now)) return;
 
     char host[64] = {}, user[48] = {}, pass[64] = {};
