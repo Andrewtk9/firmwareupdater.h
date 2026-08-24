@@ -15,9 +15,8 @@
 
 using namespace campodata;
 
-// Normally provided by FirmwareUpdater.cpp. Repeated here because this example
-// does not construct the facade.
-extern "C" bool verifyRollbackLater() { return true; }
+// verifyRollbackLater() comes from FirmwareUpdater.cpp, which the library
+// always links. Defining it here too would be a duplicate symbol.
 
 void setup() {
     Serial.begin(115200);

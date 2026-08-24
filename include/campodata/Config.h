@@ -152,6 +152,19 @@ struct OtaPolicy {
     bool allow_downgrade = false;
 };
 
+// Physical confirmation, spec section 7. Leave the pin at -1 when the product
+// has no button: the library then treats requires_button as unsatisfiable and
+// the order stays pending_user, which is the spec's behaviour for an expired
+// window.
+struct ButtonConfig {
+    int8_t button_pin        = -1;
+    bool   button_active_low = true;
+
+    // Optional "update available" indicator, spec figure 4 step 5.
+    int8_t led_pin           = -1;
+    bool   led_active_low    = false;
+};
+
 struct PowerPolicy {
     bool defer_wifi_while_modem_busy = true;
     bool quiesce_modem_during_ota    = true;
@@ -171,6 +184,7 @@ struct Config {
     WifiConfig     wifi;
     GprsConfig     gprs;
     MqttTuning     mqtt;
+    ButtonConfig   button;
     EndpointConfig endpoints;
     TopicConfig    topics;
     OtaPolicy      ota;

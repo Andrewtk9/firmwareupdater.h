@@ -154,8 +154,11 @@ public:
     // the board_id, which stays blocked after its single delivery.
     bool factoryReset();
 
-private:
+    // Opaque, defined in the .cpp. Public only so the implementation's own
+    // helpers can name it; nothing outside the library should touch it.
     struct Impl;
+
+private:
     Impl* _impl;
 };
 
