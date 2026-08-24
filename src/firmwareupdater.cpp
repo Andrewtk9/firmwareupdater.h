@@ -227,6 +227,14 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
         FWUP_LOGE("board", "SEM particao OTA: atualizacao impossivel nesta tabela");
     }
 
+    // Ate chegar uma configuracao remota, os valores em vigor sao os do
+    // projeto. Sem esta semeadura o dispositivo usaria os defaults do struct,
+    // ignorando em silencio o que foi configurado em begin().
+    d.remote_cfg.ping_interval_s     = d.cfg.ping_interval_s;
+    d.remote_cfg.ota_button_window_s = d.cfg.ota.button_window_s;
+    d.remote_cfg.mqtt_keepalive_s    = d.cfg.mqtt.keepalive_s;
+    d.remote_cfg.allow_ota_on_gprs   = d.cfg.ota.allow_ota_on_gprs;
+
     d.http.configure(20000, d.cfg.endpoints.insecure_tls, d.cfg.endpoints.ca_pem);
     d.ping_builder.setExtender(d.cb_ping, d.cb_ping_ctx);
 
@@ -627,7 +635,11 @@ static void handleOrder(FirmwareUpdater::Impl& d, const char* payload, size_t) {
 
 static bool otaLinkReady(FirmwareUpdater::Impl& d) {
     if (d.cfg.ota.link_policy == OtaLinkPolicy::WifiOnly) return linkUp();
-    return linkUp() || d.cfg.ota.allow_ota_on_gprs;
+
+    // A excecao vem da configuracao remota, nao do que foi compilado: a
+    // especificacao trata allow_ota_on_gprs como chave do servidor, com padrao
+    // desligado. O valor do projeto serve apenas como estado inicial.
+    return linkUp() || d.remote_cfg.allow_ota_on_gprs;
 }
 
 static bool buttonPressed(FirmwareUpdater::Impl& d) {
