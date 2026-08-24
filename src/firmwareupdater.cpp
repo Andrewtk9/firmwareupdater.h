@@ -453,7 +453,7 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     s.host      = host;
     s.port      = port;
     s.tls       = (port == 8883);
-    s.verify_ca = d.cfg.mqtt.verify_ca || d.cfg.mqtt.ca_pem == nullptr;
+    s.verify_ca = d.cfg.mqtt.verify_ca;
     s.ca_pem    = d.cfg.mqtt.ca_pem;
     s.username  = user;
     s.password  = pass;
@@ -480,6 +480,14 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     FWUP_LOGI("mqtt", "conectando %s:%u tls=%s usuario=%s",
               host, port, s.tls ? "sim" : "nao", user);
+
+    // Vale dizer em voz alta: cifrado nao e o mesmo que autenticado. Sem
+    // verificar o certificado, o trafego viaja protegido de quem so escuta,
+    // mas nada garante que do outro lado esta o broker certo.
+    if (s.tls && !s.verify_ca && s.ca_pem == nullptr) {
+        FWUP_LOGW("mqtt", "TLS sem verificar certificado: cifrado, porem sem "
+                          "autenticar o servidor");
+    }
 
     if (d.mqtt.begin(s)) {
         d.mqtt_started = true;
