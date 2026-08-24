@@ -34,15 +34,12 @@
   ],
   "build": {
     "flags": [
-      "-std=gnu++17",
-      "-I include",
-      "-I src"
+      "-std=gnu++17"
     ],
     "srcFilter": [
+      "+<*.cpp>",
       "+<core/>",
-      "+<platform/>",
-      "+<protocol/>",
-      "+<FirmwareUpdater.cpp>"
+      "+<platform/>"
     ],
     "unflags": [
       "-std=gnu++11"
