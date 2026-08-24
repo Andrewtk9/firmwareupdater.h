@@ -17,9 +17,10 @@ class PingBuilder {
 public:
     void setExtender(PingExtender fn, void* ctx) { _extender = fn; _ctx = ctx; }
 
-    // `dual_link` gates the additive fields. Needs ~512 bytes for the spec
-    // fields alone; allow more if the project adds its own.
-    CodecError build(const PingSnapshot& snap, bool dual_link,
+    // `strict` emits only the spec's section 6 fields, extender included.
+    // `dual_link` gates the link detail, which only means anything when both
+    // links exist and is skipped in strict mode anyway.
+    CodecError build(const PingSnapshot& snap, bool dual_link, bool strict,
                      char* out, size_t cap) const;
 
     // Last Will payload, spec section 5.

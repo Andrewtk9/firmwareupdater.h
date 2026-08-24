@@ -130,11 +130,16 @@ public:
     void onMqttConnect(MqttEventCb cb, void* ctx);
     void onMqttDisconnect(MqttEventCb cb, void* ctx);
 
-    // Builds an application topic under the device's provisioned namespace.
+    // Builds an application topic under the device's provisioned namespace:
+    // the spec's path first, the project's own segments after it.
     //
-    // Note the ACL granted at provisioning currently covers only the three spec
-    // topics, so a topic outside that namespace is refused by the broker until
-    // the server also grants the project's prefix.
+    //     /ping/<device_id>/dados
+    //     |________________|_____ spec
+    //                       \____ project
+    //
+    // A suffix is required: without one this would be the ping topic itself,
+    // whose payload the spec defines. One ACL rule over the device's subtree
+    // then covers everything it publishes.
     bool appTopic(const char* suffix, char* out, size_t cap) const;
 
     // ---------------------------------------------------------- callbacks --

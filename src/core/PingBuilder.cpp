@@ -7,7 +7,7 @@
 namespace campodata {
 
 CodecError PingBuilder::build(const PingSnapshot& snap, bool dual_link,
-                              char* out, size_t cap) const {
+                              bool strict, char* out, size_t cap) const {
     if (out == nullptr || cap == 0) return CodecError::BufferTooSmall;
 
     JsonDocument doc;
@@ -37,7 +37,7 @@ CodecError PingBuilder::build(const PingSnapshot& snap, bool dual_link,
     // Additive fields, documented in docs/SPEC-EXTENSIONS.md. Only emitted in
     // Both mode: a single-link device produces exactly the spec's payload, so
     // an unmodified server sees nothing new.
-    if (dual_link) {
+    if (dual_link && !strict) {
         JsonObject links = doc["links"].to<JsonObject>();
         JsonObject wifi  = links["wifi"].to<JsonObject>();
         wifi["up"]   = snap.wifi_up;
@@ -50,7 +50,7 @@ CodecError PingBuilder::build(const PingSnapshot& snap, bool dual_link,
         doc["ota_transport_secure"] = snap.ota_transport_secure;
     }
 
-    if (snap.ts_source != ClockSource::None) {
+    if (snap.ts_source != ClockSource::None && !strict) {
         switch (snap.ts_source) {
             case ClockSource::Sntp:   doc["ts_source"] = "sntp";   break;
             case ClockSource::Gsm:    doc["ts_source"] = "gsm";    break;
@@ -60,7 +60,7 @@ CodecError PingBuilder::build(const PingSnapshot& snap, bool dual_link,
         }
     }
 
-    if (_extender != nullptr) {
+    if (_extender != nullptr && !strict) {
         JsonObject root = doc.as<JsonObject>();
         _extender(&root, _ctx);
     }

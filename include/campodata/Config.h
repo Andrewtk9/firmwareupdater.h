@@ -216,6 +216,13 @@ struct Config {
     LogFn    log_sink  = nullptr;
     void*    log_ctx   = nullptr;
 
+    // Emite no ping apenas os campos da secao 6 da especificacao. Qualquer
+    // acrescimo - inclusive o que um onPingExtend adicionaria - fica de fora,
+    // de modo que um servidor que valide o esquema nunca receba campo
+    // desconhecido. Dado de sensor pertence ao topico de dados do projeto, e
+    // nao ao heartbeat.
+    bool ping_strict = true;
+
     uint16_t ping_interval_s = 60;
     bool     force_endpoints = false;
     bool     subscribe_task_wdt = false;

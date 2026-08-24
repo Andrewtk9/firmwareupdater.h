@@ -893,7 +893,10 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     char out[kPingScratch] = {};
     const bool dual = (d.cfg.link_mode == LinkMode::Both);
-    if (d.ping_builder.build(s, dual, out, sizeof(out)) != CodecError::Ok) return;
+    if (d.ping_builder.build(s, dual, d.cfg.ping_strict, out, sizeof(out)) !=
+        CodecError::Ok) {
+        return;
+    }
 
     const bool ok = d.mqtt->publish(d.topics.ping(),
                                    reinterpret_cast<const uint8_t*>(out),
@@ -1073,13 +1076,23 @@ bool FirmwareUpdater::unsubscribe(const char* topic) {
 
 bool FirmwareUpdater::appTopic(const char* suffix, char* out, size_t cap) const {
     Impl& d = *_impl;
-    if (out == nullptr || cap == 0 || d.cfg.topics.project_slug == nullptr) return false;
+    if (out == nullptr || cap == 0) return false;
 
-    const char* key = d.device_id[0] != '\0' ? d.device_id : d.board_id;
-    const int n = (suffix == nullptr || suffix[0] == '\0')
-                      ? snprintf(out, cap, "%s/ret/%s", d.cfg.topics.project_slug, key)
-                      : snprintf(out, cap, "%s/ret/%s/%s", d.cfg.topics.project_slug,
-                                 key, suffix);
+    // Pendura no caminho que o provisionamento entregou, em vez de comecar por
+    // um prefixo proprio: o padrao da especificacao vem primeiro e o que e do
+    // projeto vem depois dele. Assim uma unica regra de ACL sobre a subarvore
+    // do dispositivo cobre tudo o que ele publica, sem precisar liberar
+    // namespace novo a cada projeto.
+    const char* base = d.topics.ping();
+    if (base == nullptr || base[0] == ' ') return false;
+
+    // Sem sufixo seria o proprio topico de ping, cuja carga a especificacao
+    // define: publicar dados do projeto ali confundiria o servidor.
+    if (suffix == nullptr || suffix[0] == ' ') return false;
+
+    while (*suffix == '/') ++suffix;
+
+    const int n = snprintf(out, cap, "%s/%s", base, suffix);
     return n > 0 && static_cast<size_t>(n) < cap;
 }
 

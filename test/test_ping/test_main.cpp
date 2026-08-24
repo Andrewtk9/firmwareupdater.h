@@ -34,7 +34,7 @@ static PingSnapshot makeSnapshot() {
 void test_ping_has_every_spec_field() {
     PingBuilder pb;
     char out[768] = {};
-    TEST_ASSERT_EQUAL(CodecError::Ok, pb.build(makeSnapshot(), false, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(CodecError::Ok, pb.build(makeSnapshot(), false, /*strict*/ false, out, sizeof(out)));
 
     JsonDocument doc;
     TEST_ASSERT_EQUAL(DeserializationError::Ok, deserializeJson(doc, out).code());
@@ -54,7 +54,7 @@ void test_ping_has_every_spec_field() {
 void test_single_link_ping_carries_no_extensions() {
     PingBuilder pb;
     char out[768] = {};
-    pb.build(makeSnapshot(), false, out, sizeof(out));
+    pb.build(makeSnapshot(), false, /*strict*/ false, out, sizeof(out));
 
     TEST_ASSERT_NULL(strstr(out, "links"));
     TEST_ASSERT_NULL(strstr(out, "ota_link_ready"));
@@ -72,7 +72,7 @@ void test_dual_link_ping_adds_link_detail() {
 
     PingBuilder pb;
     char out[768] = {};
-    TEST_ASSERT_EQUAL(CodecError::Ok, pb.build(s, true, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(CodecError::Ok, pb.build(s, true, /*strict*/ false, out, sizeof(out)));
 
     JsonDocument doc;
     deserializeJson(doc, out);
@@ -92,7 +92,7 @@ void test_ping_omits_ts_when_clock_is_unknown() {
 
     PingBuilder pb;
     char out[768] = {};
-    pb.build(s, false, out, sizeof(out));
+    pb.build(s, false, /*strict*/ false, out, sizeof(out));
 
     JsonDocument doc;
     deserializeJson(doc, out);
@@ -107,7 +107,7 @@ void test_ping_omits_implausible_clock() {
     s.ts = 315532800;  // 1980
     PingBuilder pb;
     char out[768] = {};
-    pb.build(s, false, out, sizeof(out));
+    pb.build(s, false, /*strict*/ false, out, sizeof(out));
 
     JsonDocument doc;
     deserializeJson(doc, out);
@@ -121,7 +121,7 @@ void test_ping_carries_abort_reason() {
 
     PingBuilder pb;
     char out[768] = {};
-    pb.build(s, false, out, sizeof(out));
+    pb.build(s, false, /*strict*/ false, out, sizeof(out));
 
     JsonDocument doc;
     deserializeJson(doc, out);
@@ -141,7 +141,7 @@ void test_project_can_extend_the_ping() {
     pb.setExtender(addProjectFields, nullptr);
 
     char out[768] = {};
-    pb.build(makeSnapshot(), false, out, sizeof(out));
+    pb.build(makeSnapshot(), false, /*strict*/ false, out, sizeof(out));
 
     JsonDocument doc;
     deserializeJson(doc, out);
@@ -150,11 +150,43 @@ void test_project_can_extend_the_ping() {
     TEST_ASSERT_EQUAL_STRING("1.4.2", doc["firmware_version"]);
 }
 
+// Modo estrito: exatamente os nove campos da secao 6, nada alem. Um servidor
+// que valide o esquema nunca deve receber campo desconhecido.
+void test_strict_ping_has_only_spec_fields() {
+    PingBuilder pb;
+    pb.setExtender(addProjectFields, nullptr);   // ate o extender fica de fora
+
+    PingSnapshot s = makeSnapshot();
+    s.wifi_up        = true;
+    s.ota_link_ready = true;
+
+    char out[768] = {};
+    TEST_ASSERT_EQUAL(CodecError::Ok, pb.build(s, true, /*strict*/ true, out, sizeof(out)));
+
+    JsonDocument doc;
+    deserializeJson(doc, out);
+    JsonObject root = doc.as<JsonObject>();
+
+    size_t n = 0;
+    for (JsonPair kv : root) {
+        const char* k = kv.key().c_str();
+        const bool esperado =
+            !strcmp(k, "ts") || !strcmp(k, "firmware_version") ||
+            !strcmp(k, "repo") || !strcmp(k, "uptime_s") ||
+            !strcmp(k, "link") || !strcmp(k, "rssi") ||
+            !strcmp(k, "free_heap") || !strcmp(k, "ota_state") ||
+            !strcmp(k, "config_version");
+        TEST_ASSERT_TRUE_MESSAGE(esperado, k);
+        ++n;
+    }
+    TEST_ASSERT_EQUAL_UINT32(9, n);
+}
+
 void test_ping_rejects_small_buffer() {
     PingBuilder pb;
     char tiny[32] = {};
     TEST_ASSERT_EQUAL(CodecError::BufferTooSmall,
-                      pb.build(makeSnapshot(), false, tiny, sizeof(tiny)));
+                      pb.build(makeSnapshot(), false, /*strict*/ false, tiny, sizeof(tiny)));
 }
 
 void test_will_payload_matches_spec() {
@@ -221,6 +253,7 @@ int main(int, char**) {
     RUN_TEST(test_ping_omits_implausible_clock);
     RUN_TEST(test_ping_carries_abort_reason);
     RUN_TEST(test_project_can_extend_the_ping);
+    RUN_TEST(test_strict_ping_has_only_spec_fields);
     RUN_TEST(test_ping_rejects_small_buffer);
     RUN_TEST(test_will_payload_matches_spec);
 
