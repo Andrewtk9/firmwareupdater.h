@@ -44,6 +44,23 @@ struct GprsConfig {
     uint8_t mux_http = 1;
 };
 
+// Where the application's MQTT callbacks run.
+//
+// esp-mqtt always has its own task underneath; this only decides which task
+// calls back into the project.
+enum class DispatchMode : uint8_t {
+    // Fires from the MQTT task, the moment the message arrives. Matches how
+    // AsyncMqttClient behaves, which is what the fleet is written against.
+    // The handler must not block: it shares the MQTT task's stack and stalling
+    // there stalls the keepalive.
+    Async,
+
+    // Queues the message and fires during loop(), on the caller's task. Slower
+    // to deliver but everything runs on one owner, so the handler can touch
+    // whatever the main loop touches.
+    Sync,
+};
+
 // Broker tuning only.
 //
 // Host, port, tls, username, password and the three topic strings all arrive in
@@ -51,6 +68,12 @@ struct GprsConfig {
 // them compiled in. What is left here is what the server does not send: the
 // trust anchor and the client-side timing knobs.
 struct MqttTuning {
+    // Async matches the AsyncMqttClient behaviour the projects already expect.
+    // The library's own three topics are always handled internally on the main
+    // loop regardless of this setting, so OTA is never driven from the MQTT
+    // task no matter what the project chooses.
+    DispatchMode dispatch = DispatchMode::Async;
+
     // The provisioning response says whether to use TLS, but not which CA to
     // trust, so the certificate still has to come from the project.
     // Validation needs a valid wall clock and is forced off until there is one.

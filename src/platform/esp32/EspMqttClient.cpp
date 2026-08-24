@@ -82,6 +82,38 @@ void EspMqttClient::end() {
     _ring.clear();
 }
 
+void EspMqttClient::setDirectCallback(MqttDirectCb cb, void* ctx) {
+    _direct_ctx = ctx;
+    _direct     = cb;
+}
+
+void EspMqttClient::reserveTopic(const char* topic) {
+    if (topic == nullptr || topic[0] == '\0') return;
+    if (_reserved_count >= kMaxReserved) return;
+    if (isReserved(topic)) return;
+
+    snprintf(_reserved[_reserved_count], kMaxTopicLen, "%s", topic);
+    ++_reserved_count;
+}
+
+bool EspMqttClient::isReserved(const char* topic) const {
+    if (topic == nullptr) return false;
+    for (size_t i = 0; i < _reserved_count; ++i) {
+        if (strcmp(_reserved[i], topic) == 0) return true;
+    }
+    return false;
+}
+
+// Reserved topics always go through the ring; everything else follows the
+// project's choice.
+void EspMqttClient::deliver(const char* topic, const uint8_t* payload, size_t len) {
+    if (_direct != nullptr && !isReserved(topic)) {
+        _direct(topic, payload, len, _direct_ctx);
+        return;
+    }
+    _ring.push(topic, payload, len);
+}
+
 bool EspMqttClient::subscribe(const char* topic, uint8_t qos) {
     if (_client == nullptr || topic == nullptr || !_connected) return false;
     return esp_mqtt_client_subscribe(_client, topic, qos) >= 0;
@@ -138,9 +170,9 @@ void EspMqttClient::handle(esp_mqtt_event_handle_t event) {
             const bool fragmented = event->total_data_len > event->data_len;
 
             if (!fragmented) {
-                _ring.push(event->topic != nullptr ? event->topic : _assembly_topic,
-                           reinterpret_cast<const uint8_t*>(event->data),
-                           static_cast<size_t>(event->data_len));
+                deliver(event->topic != nullptr ? event->topic : _assembly_topic,
+                        reinterpret_cast<const uint8_t*>(event->data),
+                        static_cast<size_t>(event->data_len));
                 break;
             }
 
@@ -162,7 +194,7 @@ void EspMqttClient::handle(esp_mqtt_event_handle_t event) {
             _assembly_len += chunk;
 
             if (_assembly_len >= static_cast<size_t>(event->total_data_len)) {
-                _ring.push(_assembly_topic, _assembly, _assembly_len);
+                deliver(_assembly_topic, _assembly, _assembly_len);
                 _assembling   = false;
                 _assembly_len = 0;
             }

@@ -35,6 +35,9 @@ public:
     bool begin(const MqttSessionConfig& cfg) override;
     void end() override;
 
+    void setDirectCallback(MqttDirectCb cb, void* ctx) override;
+    void reserveTopic(const char* topic) override;
+
     bool connected() const override { return _connected; }
 
     bool subscribe(const char* topic, uint8_t qos) override;
@@ -50,9 +53,21 @@ public:
 private:
     static void onEvent(void* arg, esp_event_base_t base, int32_t id, void* data);
     void handle(esp_mqtt_event_handle_t event);
+    void deliver(const char* topic, const uint8_t* payload, size_t len);
+    bool isReserved(const char* topic) const;
+
+    static constexpr size_t kMaxReserved = 4;
 
     esp_mqtt_client_handle_t _client = nullptr;
     Ring                     _ring;
+
+    MqttDirectCb _direct     = nullptr;
+    void*        _direct_ctx = nullptr;
+
+    // The library's own topics, always queued so its state machine stays on a
+    // single owner even when the project chose async delivery.
+    char   _reserved[kMaxReserved][kMaxTopicLen] = {};
+    size_t _reserved_count = 0;
 
     // Written by the esp-mqtt task, read by the application loop. volatile is
     // enough here: a single bool with one writer, and the project rule is no

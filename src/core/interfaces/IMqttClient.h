@@ -29,12 +29,27 @@ struct MqttSessionConfig {
     bool     clean_session = true;
 };
 
+// Delivered straight from the client's own task when dispatch is Async.
+using MqttDirectCb = void (*)(const char* topic, const uint8_t* payload,
+                              size_t len, void* ctx);
+
 class IMqttClient {
 public:
     virtual ~IMqttClient() = default;
 
     virtual bool begin(const MqttSessionConfig& cfg) = 0;
     virtual void end() = 0;
+
+    // Installing a direct callback switches delivery to Async: messages bypass
+    // the queue and arrive on the client's task. Passing nullptr goes back to
+    // queueing them for poll().
+    //
+    // The topics the library owns are always queued, so its own state machine
+    // keeps a single owner whatever the application picked.
+    virtual void setDirectCallback(MqttDirectCb cb, void* ctx) = 0;
+
+    // Topics routed to poll() even in Async mode.
+    virtual void reserveTopic(const char* topic) = 0;
 
     virtual bool connected() const = 0;
 
