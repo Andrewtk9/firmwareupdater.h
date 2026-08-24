@@ -1,6 +1,7 @@
 #pragma once
 
 #include "campodata/Config.h"
+#include "campodata/LogSink.h"
 #include "campodata/Types.h"
 #include "campodata/detail/BuildTargets.h"
 
@@ -142,6 +143,16 @@ public:
     void onRemoteConfig(RemoteConfigCb cb, void* ctx);
     void onOtaState(OtaStateCb cb, void* ctx);
     void onOrderVeto(OrderVetoCb cb, void* ctx);
+
+    // ----------------------------------------------------------- logging ---
+    //
+    // On by default at Info, which narrates the cold start: board, rollback
+    // window, provisioning result, broker, subscriptions. Debug adds HTTP
+    // status, payload sizes and per-publish detail.
+
+    void setLogging(bool enabled);
+    void setLogLevel(LogLevel level);
+    bool logging() const;
 
     // -------------------------------------------------------- production ---
 

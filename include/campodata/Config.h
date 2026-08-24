@@ -11,6 +11,7 @@
 // Provisioned values beat compile-time endpoints unconditionally once
 // provisioned. force_endpoints is the single, loudly-logged escape hatch.
 
+#include "campodata/LogSink.h"
 #include "campodata/Types.h"
 
 namespace campodata {
@@ -189,6 +190,13 @@ struct Config {
     TopicConfig    topics;
     OtaPolicy      ota;
     PowerPolicy    power;
+
+    // Diagnostics. Info narrates the milestones - provisioned, connected,
+    // updating - which is what a cold start needs. Debug adds HTTP status,
+    // payload sizes and per-chunk progress. A null sink writes to Serial.
+    LogLevel log_level = LogLevel::Info;
+    LogFn    log_sink  = nullptr;
+    void*    log_ctx   = nullptr;
 
     uint16_t ping_interval_s = 60;
     bool     force_endpoints = false;

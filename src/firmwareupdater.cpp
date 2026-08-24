@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "core/Backoff.h"
+#include "core/Log.h"
 #include "core/DeviceStore.h"
 #include "core/HardwareModel.h"
 #include "core/OrderCodec.h"
@@ -149,11 +150,23 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     Impl& d = *_impl;
     d.cfg = cfg;
 
-    const ConfigError err = d.cfg.validate();
-    if (err != ConfigError::Ok) return err;
+    log::configure(d.cfg.log_sink, d.cfg.log_ctx, d.cfg.log_level);
 
-    if (!d.nvs.begin()) return ConfigError::Ok;   // degrade: run unprovisioned
+    const ConfigError err = d.cfg.validate();
+    if (err != ConfigError::Ok) {
+        FWUP_LOGE("fwup", "config invalida: %s", toString(err));
+        return err;
+    }
+
+    FWUP_LOGI("fwup", "iniciando  fw=%s  repo=%s", d.cfg.firmware_version, d.cfg.repo);
+
+    if (!d.nvs.begin()) {
+        FWUP_LOGE("nvs", "falhou ao abrir: seguindo sem persistencia");
+        return ConfigError::Ok;
+    }
     d.store = new DeviceStore(d.nvs);
+    FWUP_LOGI("nvs", "aberta  criptografada=%s",
+              d.store->encrypted() ? "sim" : "NAO");
 
     platform::probeHardware(d.hw);
     hardware::classify(d.hw, d.hardware_model, sizeof(d.hardware_model));
@@ -172,6 +185,14 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     d.caps.mqtt_max_publish_qos = d.mqtt.maxPublishQos();
     d.caps.tier                 = 1;
 
+    FWUP_LOGI("board", "%s  board_id=%s", d.hardware_model, d.board_id);
+    if (d.hw.ota_capable) {
+        FWUP_LOGI("board", "slot OTA %u bytes em 0x%06X",
+                  d.hw.ota.size_bytes, d.hw.ota.offset);
+    } else {
+        FWUP_LOGE("board", "SEM particao OTA: atualizacao impossivel nesta tabela");
+    }
+
     d.http.configure(20000, d.cfg.endpoints.insecure_tls, d.cfg.endpoints.ca_pem);
     d.ping_builder.setExtender(d.cb_ping, d.cb_ping_ctx);
 
@@ -185,8 +206,14 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     // before us - the weak Arduino default. Record it: the failure is
     // otherwise completely silent and only shows up as a rollback that never
     // happens, months later.
-    if (rollback::check(pending) == rollback::GuardState::Bypassed) {
+    const auto guard = rollback::check(pending);
+    if (guard == rollback::GuardState::Bypassed) {
         d.store->setRollbackGuardBypassed(true);
+        FWUP_LOGE("rollback", "JANELA FECHADA ANTES DO SETUP: o simbolo forte "
+                              "verifyRollbackLater() nao foi linkado");
+    } else {
+        FWUP_LOGI("rollback", "suportado=%s estado=%s",
+                  rollback::supported() ? "sim" : "nao", rollback::toString(guard));
     }
 
     if (pending && d.ota.pendingVerify()) {
@@ -218,6 +245,14 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
                                   backoff::kProvisionDeniedCount);
     d.mqtt_backoff.configure(backoff::kMqtt, backoff::kMqttCount);
     d.confirm_backoff.configure(backoff::kConfirm, backoff::kConfirmCount);
+
+    if (d.store->isProvisioned()) {
+        FWUP_LOGI("fwup", "provisionado  device_id=%s", d.device_id);
+        FWUP_LOGI("mqtt", "topicos  ping=%s  update=%s",
+                  d.topics.ping(), d.topics.update());
+    } else {
+        FWUP_LOGI("fwup", "NAO provisionado: fara POST de provisionamento ao subir a rede");
+    }
 
     d.clock.begin();
     return ConfigError::Ok;
@@ -258,9 +293,14 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     if (provisioning::buildRequest(req, body, sizeof(body)) != CodecError::Ok) return;
 
     d.state = DeviceState::Provisioning;
+    FWUP_LOGI("prov", "POST %s", url);
+    FWUP_LOGD("prov", "corpo: %s", body);
 
     HttpResponse res;
-    if (d.http.postJson(url, body, d.scratch, kJsonScratch, res) != HttpError::Ok) {
+    const HttpError herr = d.http.postJson(url, body, d.scratch, kJsonScratch, res);
+    if (herr != HttpError::Ok) {
+        FWUP_LOGE("prov", "transporte falhou (erro %u), nova tentativa em %u ms",
+                  (unsigned)herr, d.provision_backoff.currentDelayMs());
         d.provision_backoff.fail(now);
         return;
     }
@@ -268,12 +308,20 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     const ProvisionOutcome outcome = provisioning::fromHttpStatus(res.status);
     if (outcome != ProvisionOutcome::Granted) {
         // 400/403/404 need a human in the panel; retrying faster changes nothing.
+        FWUP_LOGE("prov", "HTTP %d -> %s%s", res.status,
+                  provisioning::toString(outcome),
+                  provisioning::isTransient(outcome)
+                      ? "" : " (precisa de acao no painel)");
+        FWUP_LOGD("prov", "resposta: %s", d.scratch);
         d.provision_backoff.fail(now);
         return;
     }
 
     Provisioning p;
-    if (provisioning::parseResponse(d.scratch, p) != CodecError::Ok) {
+    const CodecError cerr = provisioning::parseResponse(d.scratch, p);
+    if (cerr != CodecError::Ok) {
+        FWUP_LOGE("prov", "resposta 200 invalida: %s", provisioning::toString(cerr));
+        FWUP_LOGD("prov", "corpo: %s", d.scratch);
         d.provision_backoff.fail(now);
         return;
     }
@@ -281,6 +329,7 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     // Writes credentials and erases the bootstrap URL in one step: a
     // provisioned unit no longer carries the endpoint address.
     if (!d.store->saveProvisioning(p)) {
+        FWUP_LOGE("prov", "falhou ao gravar na NVS: nao marca como provisionado");
         d.provision_backoff.fail(now);
         return;
     }
@@ -292,12 +341,23 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     d.provision_backoff.reset();
     d.state = DeviceState::Operation;
+
+    FWUP_LOGI("prov", "OK  device_id=%s  broker=%s:%u tls=%s",
+              p.device_id, p.mqtt_host, p.mqtt_port, p.mqtt_tls ? "sim" : "nao");
+    FWUP_LOGI("prov", "URL de bootstrap apagada da NVS");
 }
 
 static void applySubscriptions(FirmwareUpdater::Impl& d) {
+    // Uma assinatura negada nao gera erro no broker: o dispositivo fica online
+    // e simplesmente nunca recebe ordem. Registrar cada uma e o unico jeito de
+    // enxergar isso.
+    FWUP_LOGI("mqtt", "assinando %s (qos 1)", d.topics.update());
     d.mqtt.subscribe(d.topics.update(), 1);
+    FWUP_LOGI("mqtt", "assinando %s (qos 1)", d.topics.config());
     d.mqtt.subscribe(d.topics.config(), 1);
+
     for (size_t i = 0; i < d.subs_count; ++i) {
+        FWUP_LOGI("mqtt", "assinando %s (qos %u) [projeto]", d.subs[i], d.subs_qos[i]);
         d.mqtt.subscribe(d.subs[i], d.subs_qos[i]);
     }
 }
@@ -309,11 +369,13 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     if (up && !d.was_connected) {
         d.was_connected = true;
+        FWUP_LOGI("mqtt", "conectado");
         applySubscriptions(d);
         d.mqtt_backoff.reset();
         if (d.cb_connect != nullptr) d.cb_connect(d.cb_conn_ctx);
     } else if (!up && d.was_connected) {
         d.was_connected = false;
+        FWUP_LOGW("mqtt", "desconectado");
         if (d.cb_disconnect != nullptr) d.cb_disconnect(d.cb_disc_ctx);
     }
 
@@ -356,9 +418,14 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
         d.mqtt.setDirectCallback(directMessage, &d);
     }
 
+    FWUP_LOGI("mqtt", "conectando %s:%u tls=%s usuario=%s",
+              host, port, s.tls ? "sim" : "nao", user);
+
     if (d.mqtt.begin(s)) {
         d.mqtt_started = true;
     } else {
+        FWUP_LOGE("mqtt", "begin falhou, nova tentativa em %u ms",
+                  d.mqtt_backoff.currentDelayMs());
         d.mqtt_backoff.fail(now);
     }
 }
@@ -394,6 +461,10 @@ static void handleConfig(FirmwareUpdater::Impl& d, const char* payload, size_t) 
     if (!d.store->applyConfigVersion(incoming.config_version)) return;
 
     d.remote_cfg = incoming;
+    FWUP_LOGI("cfg", "versao %u aplicada  ping=%us  janela_botao=%us  ota_gprs=%s",
+              incoming.config_version, incoming.ping_interval_s,
+              incoming.ota_button_window_s,
+              incoming.allow_ota_on_gprs ? "sim" : "nao");
     if (d.cb_config != nullptr) d.cb_config(d.remote_cfg, d.cb_config_ctx);
 }
 
@@ -418,7 +489,14 @@ static void handleOrder(FirmwareUpdater::Impl& d, const char* payload, size_t) {
     const OrderRejection why = order::validate(incoming, current_version, current_repo,
                                                d.hw.ota.size_bytes, last_id,
                                                d.cfg.ota.allow_downgrade);
-    if (why == OrderRejection::Duplicate) return;   // retained replay, stay quiet
+    FWUP_LOGI("ota", "ordem %s  versao %s -> %s  %u bytes",
+              incoming.update_id, current_version, incoming.target_version,
+              incoming.size_bytes);
+
+    if (why == OrderRejection::Duplicate) {
+        FWUP_LOGD("ota", "ja tratada, ignorando (topico retido reentrega)");
+        return;
+    }
 
     if (why != OrderRejection::None) {
         const AbortReason reason =
@@ -427,7 +505,10 @@ static void handleOrder(FirmwareUpdater::Impl& d, const char* payload, size_t) {
             (why == OrderRejection::WrongRepo)  ? AbortReason::ServerReject :
             (why == OrderRejection::NoSha256)   ? AbortReason::Checksum :
                                                   AbortReason::None;
-        if (why != OrderRejection::SameVersion) {
+        if (why == OrderRejection::SameVersion) {
+            FWUP_LOGD("ota", "ja esta nesta versao");
+        } else {
+            FWUP_LOGE("ota", "ordem recusada: %s", order::toString(why));
             d.setOtaState(OtaState::Failed, reason);
         }
         return;
@@ -457,6 +538,8 @@ static bool buttonPressed(FirmwareUpdater::Impl& d) {
 }
 
 static void failOta(FirmwareUpdater::Impl& d, AbortReason reason) {
+    FWUP_LOGE("ota", "abortado: %s (escritos %u bytes)",
+              toString(reason), d.ota.written());
     d.ota.abort();
     d.http.endDownload();
     d.has_order = false;
@@ -482,6 +565,7 @@ static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
         return;
     }
 
+    FWUP_LOGI("ota", "baixando de %s", d.order.url);
     d.dl_started_ms    = now;
     d.last_progress_ms = now;
     d.state            = DeviceState::Downloading;
@@ -500,6 +584,7 @@ static void pumpDownload(FirmwareUpdater::Impl& d, uint32_t now) {
         const HttpError r = d.http.readChunk(buf, sizeof(buf), got);
 
         if (r == HttpError::Eof) {
+            FWUP_LOGI("ota", "download completo: %u bytes", d.ota.written());
             d.http.endDownload();
             d.state = DeviceState::Verifying;
             d.setOtaState(OtaState::Verifying, AbortReason::None);
@@ -529,6 +614,7 @@ static void verifyAndApply(FirmwareUpdater::Impl& d, uint32_t now) {
     // unverified image can never be booted by mistake.
     const OtaSinkError r = d.ota.finish(d.order.has_sha256 ? d.order.sha256 : nullptr);
     if (r != OtaSinkError::Ok) {
+        FWUP_LOGE("ota", "verificacao falhou: %s", toString(r));
         failOta(d, r == OtaSinkError::ChecksumMismatch ? AbortReason::Checksum
                                                        : AbortReason::Flash);
         return;
@@ -549,6 +635,8 @@ static void verifyAndApply(FirmwareUpdater::Impl& d, uint32_t now) {
     if (d.clock.utc(epoch)) p.started_at_s = static_cast<uint32_t>(epoch);
     p.deadline_s = p.started_at_s + d.cfg.ota.rollback_deadline_s;
 
+    FWUP_LOGI("ota", "SHA-256 confere, particao marcada; reiniciando para %s",
+              p.version);
     d.store->savePending(p);
     d.setOtaState(OtaState::PendingReboot, AbortReason::None);
 
@@ -628,6 +716,8 @@ static void confirmStep(FirmwareUpdater::Impl& d, uint32_t now) {
     int64_t epoch = 0;
     if (p.deadline_s > 0 && d.clock.utc(epoch) &&
         static_cast<uint32_t>(epoch) > p.deadline_s) {
+        FWUP_LOGE("ota", "prazo de confirmacao esgotado: revertendo para a "
+                         "particao anterior");
         d.store->clearPending();
         d.ota.markInvalidAndReboot();
         return;
@@ -650,12 +740,15 @@ static void confirmStep(FirmwareUpdater::Impl& d, uint32_t now) {
     HttpResponse res;
     if (d.http.postJson(url, body, d.scratch, kJsonScratch, res) != HttpError::Ok ||
         res.status != 200) {
+        FWUP_LOGW("ota", "confirmacao falhou (HTTP %d), nova tentativa em %u ms",
+                  res.status, d.confirm_backoff.currentDelayMs());
         d.confirm_backoff.fail(now);
         return;
     }
 
     // Spec section 9.2: only after the 200 does the device record the version
     // and cancel the rollback.
+    FWUP_LOGI("ota", "confirmado pelo servidor: gravando versao e cancelando rollback");
     d.store->commitFirmware(p.version, p.repo);
     d.store->setLastUpdateId(p.update_id);
     d.ota.markValid();
@@ -703,8 +796,14 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
     const bool dual = (d.cfg.link_mode == LinkMode::Both);
     if (d.ping_builder.build(s, dual, out, sizeof(out)) != CodecError::Ok) return;
 
-    d.mqtt.publish(d.topics.ping(), reinterpret_cast<const uint8_t*>(out),
-                   strlen(out), 1, false);
+    const bool ok = d.mqtt.publish(d.topics.ping(),
+                                   reinterpret_cast<const uint8_t*>(out),
+                                   strlen(out), 1, false);
+    if (ok) {
+        FWUP_LOGD("ping", "%s", out);
+    } else {
+        FWUP_LOGW("ping", "publish falhou");
+    }
 }
 
 // ------------------------------------------------------------------ loop ---
@@ -790,10 +889,13 @@ bool FirmwareUpdater::publish(const char* topic, const uint8_t* payload, size_t 
 
     if (!d.mqtt.connected()) {
         d.mqtt_status = MqttStatus::NotConnected;
+        FWUP_LOGW("mqtt", "publish em %s descartado: offline", topic);
         return false;
     }
     if (len > d.cfg.mqtt.buffer_bytes) {
         d.mqtt_status = MqttStatus::PayloadTooLarge;
+        FWUP_LOGE("mqtt", "publish em %s descartado: %u bytes > buffer de %u",
+                  topic, (unsigned)len, d.cfg.mqtt.buffer_bytes);
         return false;
     }
 
@@ -801,12 +903,20 @@ bool FirmwareUpdater::publish(const char* topic, const uint8_t* payload, size_t 
     if (effective > d.caps.mqtt_max_publish_qos) {
         effective     = d.caps.mqtt_max_publish_qos;
         d.mqtt_status = MqttStatus::QosDowngraded;
+        FWUP_LOGW("mqtt", "qos %u indisponivel neste transporte, usando %u",
+                  qos, effective);
     } else {
         d.mqtt_status = MqttStatus::Ok;
     }
 
     const bool ok = d.mqtt.publish(topic, payload, len, effective, retain);
-    if (!ok && d.mqtt_status == MqttStatus::Ok) d.mqtt_status = MqttStatus::Failed;
+    if (!ok) {
+        if (d.mqtt_status == MqttStatus::Ok) d.mqtt_status = MqttStatus::Failed;
+        FWUP_LOGE("mqtt", "publish em %s falhou (%u bytes)", topic, (unsigned)len);
+    } else {
+        FWUP_LOGD("mqtt", "-> %s  %u bytes  qos %u%s", topic, (unsigned)len,
+                  effective, retain ? " retido" : "");
+    }
     return ok;
 }
 
@@ -907,6 +1017,10 @@ void FirmwareUpdater::onOrderVeto(OrderVetoCb cb, void* ctx) {
 }
 
 // ------------------------------------------------------------ production ---
+
+void FirmwareUpdater::setLogging(bool enabled) { log::setEnabled(enabled); }
+void FirmwareUpdater::setLogLevel(LogLevel level) { log::setLevel(level); }
+bool FirmwareUpdater::logging() const { return log::enabled(); }
 
 bool FirmwareUpdater::seedBootstrapUrl(const char* url) {
     return _impl->store != nullptr && _impl->store->seedBootstrapUrl(url);
