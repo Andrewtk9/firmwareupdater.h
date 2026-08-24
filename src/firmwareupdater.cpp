@@ -282,6 +282,22 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
 
     if (d.store->isProvisioned()) {
         FWUP_LOGI("fwup", "provisionado  device_id=%s", d.device_id);
+
+        // O que veio do provisionamento e vive na NVS. Sem isso no boot, uma
+        // credencial errada so apareceria como "nao conecta", sem dizer o que
+        // o dispositivo esta de fato tentando usar. A senha nao entra no log.
+        char host[64] = {}, user[48] = {};
+        uint16_t port = 0;
+        d.store->mqttHost(host, sizeof(host));
+        d.store->mqttPort(port);
+        d.store->mqttUser(user, sizeof(user));
+        FWUP_LOGI("mqtt", "broker %s:%u  usuario=%s", host, port, user);
+
+        char api[128] = {};
+        if (d.store->apiBaseUrl(api, sizeof(api))) {
+            FWUP_LOGI("fwup", "api=%s", api);
+        }
+
         FWUP_LOGI("mqtt", "topicos  ping=%s  update=%s",
                   d.topics.ping(), d.topics.update());
     } else {
