@@ -56,6 +56,28 @@ bool linkUp() {
     return WiFi.status() == WL_CONNECTED;
 }
 
+// Nome que nao resolve e quase sempre rede sem DNS, nao problema do servidor.
+// Um DNS em 0.0.0.0 significa que o DHCP nao entregou nenhum, e ai nenhuma
+// chamada por nome vai funcionar - nem NTP, nem HTTPS.
+void logNetwork() {
+    if (WiFi.status() != WL_CONNECTED) {
+        FWUP_LOGW("net", "wifi desconectado");
+        return;
+    }
+
+    const IPAddress dns = WiFi.dnsIP();
+    FWUP_LOGI("net", "ip=%s gw=%s dns=%s rssi=%d",
+              WiFi.localIP().toString().c_str(),
+              WiFi.gatewayIP().toString().c_str(),
+              dns.toString().c_str(),
+              (int)WiFi.RSSI());
+
+    if (dns == IPAddress(0, 0, 0, 0)) {
+        FWUP_LOGE("net", "sem servidor DNS: o DHCP nao entregou um. "
+                         "Nenhuma chamada por nome vai resolver.");
+    }
+}
+
 }  // namespace
 
 struct FirmwareUpdater::Impl {
@@ -299,21 +321,23 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     HttpResponse res;
     const HttpError herr = d.http.postJson(url, body, d.scratch, kJsonScratch, res);
     if (herr != HttpError::Ok) {
-        FWUP_LOGE("prov", "transporte falhou (erro %u), nova tentativa em %u ms",
-                  (unsigned)herr, d.provision_backoff.currentDelayMs());
         d.provision_backoff.fail(now);
+        FWUP_LOGE("prov", "nao alcancou o servidor (%s), nova tentativa em %u ms",
+                  toString(herr), d.provision_backoff.currentDelayMs());
+        // Nome nao resolvido costuma ser rede sem DNS, e nao problema da API.
+        logNetwork();
         return;
     }
 
     const ProvisionOutcome outcome = provisioning::fromHttpStatus(res.status);
     if (outcome != ProvisionOutcome::Granted) {
         // 400/403/404 need a human in the panel; retrying faster changes nothing.
+        d.provision_backoff.fail(now);
         FWUP_LOGE("prov", "HTTP %d -> %s%s", res.status,
                   provisioning::toString(outcome),
                   provisioning::isTransient(outcome)
                       ? "" : " (precisa de acao no painel)");
         FWUP_LOGD("prov", "resposta: %s", d.scratch);
-        d.provision_backoff.fail(now);
         return;
     }
 
@@ -424,9 +448,9 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     if (d.mqtt.begin(s)) {
         d.mqtt_started = true;
     } else {
+        d.mqtt_backoff.fail(now);
         FWUP_LOGE("mqtt", "begin falhou, nova tentativa em %u ms",
                   d.mqtt_backoff.currentDelayMs());
-        d.mqtt_backoff.fail(now);
     }
 }
 

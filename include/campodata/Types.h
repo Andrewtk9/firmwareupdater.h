@@ -264,5 +264,6 @@ const char* toString(LinkType);
 const char* toString(DeviceState);
 const char* toString(ConfigError);
 const char* toString(OtaSinkError);
+const char* toString(HttpError);
 
 }  // namespace campodata

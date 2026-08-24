@@ -89,6 +89,22 @@ const char* toString(ConfigError e) {
     return "unknown";
 }
 
+const char* toString(HttpError e) {
+    switch (e) {
+        case HttpError::Ok:               return "ok";
+        case HttpError::WouldBlock:       return "sem dados ainda";
+        case HttpError::Eof:              return "fim";
+        // Quase sempre DNS: o nome nao virou IP.
+        case HttpError::ConnectFailed:    return "nao conectou";
+        case HttpError::BadStatus:        return "status inesperado";
+        case HttpError::RangeUnsupported: return "servidor ignorou Range";
+        case HttpError::Timeout:          return "timeout";
+        case HttpError::TooLarge:         return "grande demais";
+        case HttpError::Transport:        return "falha de transporte";
+    }
+    return "desconhecido";
+}
+
 const char* toString(OtaSinkError e) {
     switch (e) {
         case OtaSinkError::Ok:               return "ok";
