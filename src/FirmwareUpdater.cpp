@@ -677,7 +677,7 @@ static void handleConfig(FirmwareUpdater::Impl& d, const char* payload, size_t) 
               incoming.config_version, incoming.ping_interval_s,
               incoming.ota_button_window_s,
               incoming.allow_ota_on_gprs ? "sim" : "nao");
-    if (d.cb_config != nullptr) d.cb_config(d.remote_cfg, d.cb_config_ctx);
+    if (d.cb_config != nullptr) d.cb_config(d.remote_cfg, payload, d.cb_config_ctx);
 }
 
 static void handleOrder(FirmwareUpdater::Impl& d, const char* payload, size_t) {
