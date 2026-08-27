@@ -32,7 +32,13 @@ using MqttEventCb = void (*)(void* ctx);
 using PingExtendCb = void (*)(void* json_object, void* ctx);
 
 // Called when a remote configuration arrives and has been applied.
-using RemoteConfigCb = void (*)(const RemoteConfig& cfg, void* ctx);
+//
+// `payload` is the document exactly as it came from /config, so a project can
+// read the fields that are its own. The specification fixes only a handful of
+// keys, and every project in the fleet configures things the spec never mentions
+// - baud rate, UDP target, reading window. Without the raw document those
+// projects would lose remote configuration on the way to this library.
+using RemoteConfigCb = void (*)(const RemoteConfig& cfg, const char* payload, void* ctx);
 
 // Every OTA state transition. Use it to pause sensors, drive a LED, or stop
 // whatever must not run during a flash write.
