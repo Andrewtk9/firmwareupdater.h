@@ -26,6 +26,16 @@ public:
     // than inventing one.
     bool utc(int64_t& epoch_s) const;
 
+    // Accepts time from outside the IP stack.
+    //
+    // SNTP needs an lwIP interface, which a cellular-only device does not have:
+    // the modem is reachable only as AT commands. Without this the ts field -
+    // required by the ping - would never have a source there.
+    //
+    // Ignored once a clock is already running, so the modem never drags a device
+    // that already has SNTP.
+    bool acceptExternalUtc(int64_t epoch_s, ClockSource source);
+
     ClockSource source() const { return _source; }
 
 private:

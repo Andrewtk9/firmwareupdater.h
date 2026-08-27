@@ -6,6 +6,12 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+
+#if defined(FWUP_ENABLE_GPRS)
+#include "platform/gprs/GsmHttpClient.h"
+#include "platform/gprs/GsmLink.h"
+#include "platform/gprs/GsmMqttClient.h"
+#endif
 #include <esp_system.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +20,7 @@
 #include "core/Log.h"
 #include "core/DeviceStore.h"
 #include "core/HardwareModel.h"
+#include "core/Iso8601.h"
 #include "core/OrderCodec.h"
 #include "core/PingBuilder.h"
 #include "core/ProvisioningCodec.h"
@@ -52,7 +59,7 @@ constexpr size_t   kJsonScratch        = 1024;
 constexpr size_t   kPingScratch        = 768;
 constexpr uint32_t kOtaChunkBuffer     = 1024;
 
-bool linkUp() {
+bool wifiUp() {
     return WiFi.status() == WL_CONNECTED;
 }
 
@@ -90,9 +97,19 @@ void logNetwork() {
 struct FirmwareUpdater::Impl {
     Config          cfg;
     Esp32Nvs        nvs;
-    Esp32HttpClient http;
-    EspMqttClient mqtt_esp;
-    IMqttClient*  mqtt = &mqtt_esp;
+    Esp32HttpClient http_wifi;
+    EspMqttClient   mqtt_esp;
+
+#if defined(FWUP_ENABLE_GPRS)
+    GsmLink       gsm;
+    GsmHttpClient http_gsm{gsm};
+    GsmMqttClient mqtt_gsm{gsm};
+#endif
+
+    // Apontam para a implementacao do link ativo. Trocar de link e trocar estes
+    // dois ponteiros, e mais nada no resto da maquina de estados.
+    IHttpClient* http = &http_wifi;
+    IMqttClient* mqtt = &mqtt_esp;
     Esp32OtaSink    ota;
     ArduinoClock    clock;
     TopicResolver   topics;
@@ -129,6 +146,7 @@ struct FirmwareUpdater::Impl {
     Backoff  mqtt_backoff;
     Backoff  confirm_backoff;
     uint32_t last_ping_ms  = 0;
+    uint32_t last_gsm_clock_ms = 0;
     uint32_t last_mqtt_try = 0;
     bool     mqtt_started  = false;
     bool     was_connected = false;
@@ -235,7 +253,8 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     d.remote_cfg.mqtt_keepalive_s    = d.cfg.mqtt.keepalive_s;
     d.remote_cfg.allow_ota_on_gprs   = d.cfg.ota.allow_ota_on_gprs;
 
-    d.http.configure(20000, d.cfg.endpoints.insecure_tls, d.cfg.endpoints.ca_pem);
+    // Timeout e TLS sao do transporte WiFi: a pilha celular nao negocia TLS.
+    d.http_wifi.configure(20000, d.cfg.endpoints.insecure_tls, d.cfg.endpoints.ca_pem);
     d.ping_builder.setExtender(d.cb_ping, d.cb_ping_ctx);
 
     // Restore what survived the reboot.
@@ -289,6 +308,23 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
     d.mqtt_backoff.configure(backoff::kMqtt, backoff::kMqttCount);
     d.confirm_backoff.configure(backoff::kConfirm, backoff::kConfirmCount);
 
+#if defined(FWUP_ENABLE_GPRS)
+    if (d.cfg.link_mode != LinkMode::Wifi) {
+        if (d.gsm.begin(d.cfg.gprs)) {
+            // A regra de nunca usar HTTP e MQTT ao mesmo tempo mora aqui: quem
+            // pega o link para HTTP derruba a sessao antes, e a devolve depois.
+            // Deixar isso a cargo de quem chama seria esquecer uma vez e passar
+            // semanas atras de um MQTT que cai sozinho.
+            d.gsm.setMqttGate(
+                [](void* ctx) { static_cast<GsmMqttClient*>(ctx)->suspend(); },
+                [](void* ctx) { static_cast<GsmMqttClient*>(ctx)->resume(); },
+                &d.mqtt_gsm);
+        } else {
+            FWUP_LOGE("gprs", "modem nao inicializou; segue apenas por wifi");
+        }
+    }
+#endif
+
     if (d.store->isProvisioned()) {
         FWUP_LOGI("fwup", "provisionado  device_id=%s", d.device_id);
 
@@ -321,6 +357,75 @@ ConfigError FirmwareUpdater::begin(const Config& cfg) {
 
 // api_base_url comes from provisioning; before that, the bootstrap URL is the
 // only address the device has.
+// Qual link esta de fato carregando trafego agora.
+//
+// No modo Both o WiFi ganha quando esta no ar: e o unico que faz TLS e o unico
+// por onde a especificacao permite baixar firmware.
+static LinkType activeLink(FirmwareUpdater::Impl& d) {
+    if (d.cfg.link_mode != LinkMode::Gprs && wifiUp()) return LinkType::Wifi;
+
+#if defined(FWUP_ENABLE_GPRS)
+    if (d.cfg.link_mode != LinkMode::Wifi && d.gsm.up()) return LinkType::Gprs;
+#endif
+
+    return LinkType::None;
+}
+
+static bool linkUp(FirmwareUpdater::Impl& d) {
+    return activeLink(d) != LinkType::None;
+}
+
+// Aponta HTTP e MQTT para a implementacao do link ativo. Chamado a cada passada:
+// no modo Both o link muda sozinho quando o WiFi vai e volta.
+static void bindTransports(FirmwareUpdater::Impl& d) {
+#if defined(FWUP_ENABLE_GPRS)
+    const bool usar_gprs = (activeLink(d) == LinkType::Gprs);
+
+    IHttpClient* http = usar_gprs ? static_cast<IHttpClient*>(&d.http_gsm)
+                                  : static_cast<IHttpClient*>(&d.http_wifi);
+    IMqttClient* mqtt = usar_gprs ? static_cast<IMqttClient*>(&d.mqtt_gsm)
+                                  : static_cast<IMqttClient*>(&d.mqtt_esp);
+
+    if (http != d.http || mqtt != d.mqtt) {
+        FWUP_LOGI("link", "transporte agora em %s", usar_gprs ? "gprs" : "wifi");
+        // Nunca duas sessoes com a mesma credencial: o broker derruba uma delas.
+        if (d.mqtt != nullptr && d.mqtt != mqtt) d.mqtt->end();
+        d.http = http;
+        d.mqtt = mqtt;
+    }
+#else
+    (void)d;
+#endif
+}
+
+#if defined(FWUP_ENABLE_GPRS)
+// Hora vinda do modem, para o link que nao tem SNTP.
+//
+// O offset que o modem devolve e aplicado, e nao descartado: descarta-lo e
+// exatamente o que gravou hora local sob o nome de UTC na frota inteira.
+static void gsmClockStep(FirmwareUpdater::Impl& d, uint32_t now) {
+    if (d.clock.source() != ClockSource::None || !d.gsm.up()) return;
+    if (d.last_gsm_clock_ms != 0 && now - d.last_gsm_clock_ms < 10000) return;
+    d.last_gsm_clock_ms = now;
+
+    int    ano = 0, mes = 0, dia = 0, hora = 0, minuto = 0, segundo = 0;
+    int8_t quartos = 0;
+
+    if (!d.gsm.networkTime(ano, mes, dia, hora, minuto, segundo, quartos)) return;
+
+    iso8601::Civil local;
+    local.year   = ano;   local.month  = static_cast<uint8_t>(mes);
+    local.day    = static_cast<uint8_t>(dia);
+    local.hour   = static_cast<uint8_t>(hora);
+    local.minute = static_cast<uint8_t>(minuto);
+    local.second = static_cast<uint8_t>(segundo);
+
+    if (d.clock.acceptExternalUtc(iso8601::fromGsmLocal(local, quartos), ClockSource::Gsm)) {
+        FWUP_LOGI("clock", "hora obtida do modem (offset %d quartos de hora)", (int)quartos);
+    }
+}
+#endif
+
 static bool apiBase(FirmwareUpdater::Impl& d, char* out, size_t cap) {
     if (d.store != nullptr && d.store->apiBaseUrl(out, cap)) return true;
 
@@ -331,7 +436,7 @@ static bool apiBase(FirmwareUpdater::Impl& d, char* out, size_t cap) {
 }
 
 static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
-    if (!linkUp()) return;
+    if (!linkUp(d)) return;
 
     // Sem DNS a requisicao nao tem como chegar a lugar nenhum, entao nem sai.
     // O aviso sai uma vez por queda, e nao a cada volta do loop.
@@ -374,7 +479,7 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
     FWUP_LOGD("prov", "corpo: %s", body);
 
     HttpResponse res;
-    const HttpError herr = d.http.postJson(url, body, d.scratch, kJsonScratch, res);
+    const HttpError herr = d.http->postJson(url, body, d.scratch, kJsonScratch, res);
     if (herr != HttpError::Ok) {
         // Rede, e nao recusa: volta rapido em vez de esperar o backoff longo.
         d.transport_backoff.fail(now);
@@ -459,7 +564,7 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
         if (d.cb_disconnect != nullptr) d.cb_disconnect(d.cb_disc_ctx);
     }
 
-    if (up || !linkUp()) return;
+    if (up || !linkUp(d)) return;
 
     // O broker tambem e alcancado por nome: sem DNS a sessao nao teria como
     // subir, e esp-mqtt ficaria reciclando socket sozinho na propria task.
@@ -634,12 +739,16 @@ static void handleOrder(FirmwareUpdater::Impl& d, const char* payload, size_t) {
 // ------------------------------------------------------------------- ota ---
 
 static bool otaLinkReady(FirmwareUpdater::Impl& d) {
-    if (d.cfg.ota.link_policy == OtaLinkPolicy::WifiOnly) return linkUp();
+    // WifiOnly exige WiFi, e nao apenas algum link no ar: num dispositivo dual o
+    // GPRS costuma estar sempre de pe, e aceitar "algum link" liberaria o
+    // download justamente onde a especificacao proibe.
+    if (d.cfg.ota.link_policy == OtaLinkPolicy::WifiOnly) return wifiUp();
 
     // A excecao vem da configuracao remota, nao do que foi compilado: a
     // especificacao trata allow_ota_on_gprs como chave do servidor, com padrao
     // desligado. O valor do projeto serve apenas como estado inicial.
-    return linkUp() || d.remote_cfg.allow_ota_on_gprs;
+    if (wifiUp()) return true;
+    return linkUp(d) && d.remote_cfg.allow_ota_on_gprs;
 }
 
 static bool buttonPressed(FirmwareUpdater::Impl& d) {
@@ -652,7 +761,7 @@ static void failOta(FirmwareUpdater::Impl& d, AbortReason reason) {
     FWUP_LOGE("ota", "abortado: %s (escritos %u bytes)",
               toString(reason), d.ota.written());
     d.ota.abort();
-    d.http.endDownload();
+    d.http->endDownload();
     d.has_order = false;
     d.state     = DeviceState::Operation;
     d.setOtaState(OtaState::Failed, reason);
@@ -661,7 +770,7 @@ static void failOta(FirmwareUpdater::Impl& d, AbortReason reason) {
 static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
     // The server builds every download URL from one configured base, so a
     // link that cannot do TLS may be handed an https:// address.
-    if (!url::fetchable(d.order.url, d.http.supportsTls())) {
+    if (!url::fetchable(d.order.url, d.http->supportsTls())) {
         failOta(d, AbortReason::NoWifi);
         return;
     }
@@ -671,7 +780,7 @@ static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
         return;
     }
 
-    if (d.http.beginDownload(d.order.url, 0) != HttpError::Ok) {
+    if (d.http->beginDownload(d.order.url, 0) != HttpError::Ok) {
         failOta(d, AbortReason::Network);
         return;
     }
@@ -692,11 +801,11 @@ static void pumpDownload(FirmwareUpdater::Impl& d, uint32_t now) {
 
     while (millis() < deadline && moved < d.cfg.ota.chunk_bytes) {
         size_t got = 0;
-        const HttpError r = d.http.readChunk(buf, sizeof(buf), got);
+        const HttpError r = d.http->readChunk(buf, sizeof(buf), got);
 
         if (r == HttpError::Eof) {
             FWUP_LOGI("ota", "download completo: %u bytes", d.ota.written());
-            d.http.endDownload();
+            d.http->endDownload();
             d.state = DeviceState::Verifying;
             d.setOtaState(OtaState::Verifying, AbortReason::None);
             return;
@@ -814,7 +923,7 @@ static void otaStep(FirmwareUpdater::Impl& d, uint32_t now) {
 // --------------------------------------------------------------- confirm ---
 
 static void confirmStep(FirmwareUpdater::Impl& d, uint32_t now) {
-    if (!linkUp() || !d.confirm_backoff.ready(now)) return;
+    if (!linkUp(d) || !d.confirm_backoff.ready(now)) return;
 
     DeviceStore::Pending p;
     if (!d.store->loadPending(p)) {
@@ -849,7 +958,7 @@ static void confirmStep(FirmwareUpdater::Impl& d, uint32_t now) {
              d.device_id, p.version, p.repo, p.previous, 0u);
 
     HttpResponse res;
-    if (d.http.postJson(url, body, d.scratch, kJsonScratch, res) != HttpError::Ok ||
+    if (d.http->postJson(url, body, d.scratch, kJsonScratch, res) != HttpError::Ok ||
         res.status != 200) {
         FWUP_LOGW("ota", "confirmacao falhou (HTTP %d), nova tentativa em %u ms",
                   res.status, d.confirm_backoff.currentDelayMs());
@@ -893,8 +1002,18 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
     s.firmware_version = version;
     s.repo             = d.cfg.repo;
     s.uptime_s         = now / 1000u;
-    s.link             = linkUp() ? LinkType::Wifi : LinkType::None;
-    s.rssi             = linkUp() ? static_cast<int16_t>(WiFi.RSSI()) : 0;
+    // O servidor decide se vale mandar update olhando este campo, entao ele tem
+    // de dizer por onde o dispositivo esta falando de verdade.
+    s.link = activeLink(d);
+    s.rssi = 0;
+    if (s.link == LinkType::Wifi) {
+        s.rssi = static_cast<int16_t>(WiFi.RSSI());
+    }
+#if defined(FWUP_ENABLE_GPRS)
+    else if (s.link == LinkType::Gprs) {
+        s.rssi = d.gsm.rssiDbm();
+    }
+#endif
     s.free_heap        = ESP.getFreeHeap();
     s.ota_state        = d.ota_state;
     s.abort_reason     = d.abort_reason;
@@ -928,6 +1047,19 @@ void FirmwareUpdater::loop() {
 
     const uint32_t now = millis();
     d.clock.tick(now);
+
+#if defined(FWUP_ENABLE_GPRS)
+    // O modem sobe em segundos e nada disso pode bloquear a aplicacao, entao ele
+    // e passo de loop como todo o resto.
+    if (d.cfg.link_mode != LinkMode::Wifi) {
+        d.gsm.loop(now);
+        d.mqtt_gsm.loop(now);
+        gsmClockStep(d, now);
+    }
+#endif
+
+    // No modo Both o link ativo muda sozinho conforme o WiFi vai e volta.
+    bindTransports(d);
 
     if (d.state == DeviceState::Confirming) {
         confirmStep(d, now);
