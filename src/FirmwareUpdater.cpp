@@ -20,6 +20,7 @@
 #include "core/Log.h"
 #include "core/DeviceStore.h"
 #include "core/HardwareModel.h"
+#include "core/Iso8601.h"
 #include "core/OrderCodec.h"
 #include "core/PingBuilder.h"
 #include "core/ProvisioningCodec.h"
@@ -145,6 +146,7 @@ struct FirmwareUpdater::Impl {
     Backoff  mqtt_backoff;
     Backoff  confirm_backoff;
     uint32_t last_ping_ms  = 0;
+    uint32_t last_gsm_clock_ms = 0;
     uint32_t last_mqtt_try = 0;
     bool     mqtt_started  = false;
     bool     was_connected = false;
@@ -395,6 +397,34 @@ static void bindTransports(FirmwareUpdater::Impl& d) {
     (void)d;
 #endif
 }
+
+#if defined(FWUP_ENABLE_GPRS)
+// Hora vinda do modem, para o link que nao tem SNTP.
+//
+// O offset que o modem devolve e aplicado, e nao descartado: descarta-lo e
+// exatamente o que gravou hora local sob o nome de UTC na frota inteira.
+static void gsmClockStep(FirmwareUpdater::Impl& d, uint32_t now) {
+    if (d.clock.source() != ClockSource::None || !d.gsm.up()) return;
+    if (d.last_gsm_clock_ms != 0 && now - d.last_gsm_clock_ms < 10000) return;
+    d.last_gsm_clock_ms = now;
+
+    int    ano = 0, mes = 0, dia = 0, hora = 0, minuto = 0, segundo = 0;
+    int8_t quartos = 0;
+
+    if (!d.gsm.networkTime(ano, mes, dia, hora, minuto, segundo, quartos)) return;
+
+    iso8601::Civil local;
+    local.year   = ano;   local.month  = static_cast<uint8_t>(mes);
+    local.day    = static_cast<uint8_t>(dia);
+    local.hour   = static_cast<uint8_t>(hora);
+    local.minute = static_cast<uint8_t>(minuto);
+    local.second = static_cast<uint8_t>(segundo);
+
+    if (d.clock.acceptExternalUtc(iso8601::fromGsmLocal(local, quartos), ClockSource::Gsm)) {
+        FWUP_LOGI("clock", "hora obtida do modem (offset %d quartos de hora)", (int)quartos);
+    }
+}
+#endif
 
 static bool apiBase(FirmwareUpdater::Impl& d, char* out, size_t cap) {
     if (d.store != nullptr && d.store->apiBaseUrl(out, cap)) return true;
@@ -1024,6 +1054,7 @@ void FirmwareUpdater::loop() {
     if (d.cfg.link_mode != LinkMode::Wifi) {
         d.gsm.loop(now);
         d.mqtt_gsm.loop(now);
+        gsmClockStep(d, now);
     }
 #endif
 

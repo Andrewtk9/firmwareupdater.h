@@ -3,6 +3,7 @@
 #if FWUP_TARGET_ARDUINO
 
 #include <Arduino.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "core/Iso8601.h"
@@ -36,6 +37,17 @@ void ArduinoClock::tick(uint32_t now_ms) {
 
     const time_t t = time(nullptr);
     if (iso8601::plausible(static_cast<int64_t>(t))) _source = ClockSource::Sntp;
+}
+
+bool ArduinoClock::acceptExternalUtc(int64_t epoch_s, ClockSource source) {
+    if (_source != ClockSource::None) return false;   // ja ha relogio valido
+    if (!iso8601::plausible(epoch_s)) return false;
+
+    const timeval tv = {static_cast<time_t>(epoch_s), 0};
+    if (settimeofday(&tv, nullptr) != 0) return false;
+
+    _source = source;
+    return true;
 }
 
 uint32_t ArduinoClock::nowMs() const {
