@@ -1,5 +1,7 @@
 #include "platform/esp32/Esp32OtaSink.h"
 
+#include "core/Log.h"
+
 #if FWUP_TARGET_ESP32
 
 #include <esp_app_format.h>
@@ -45,7 +47,10 @@ OtaSinkError Esp32OtaSink::begin(uint32_t expected_size) {
     // makes esp_ota_begin erase the whole slot up front - roughly 375 sectors
     // at ~40 ms each - which blows straight past the 5 s task watchdog.
     const esp_err_t err = esp_ota_begin(_target, OTA_SIZE_UNKNOWN, &_handle);
-    if (err != ESP_OK) return OtaSinkError::BeginFailed;
+    if (err != ESP_OK) {
+        FWUP_LOGE("ota", "esp_ota_begin falhou: %s", esp_err_to_name(err));
+        return OtaSinkError::BeginFailed;
+    }
 
     if (!_sha.begin()) {
         esp_ota_abort(_handle);
@@ -66,7 +71,14 @@ OtaSinkError Esp32OtaSink::write(const uint8_t* data, size_t len) {
 
     if (_target != nullptr && _written + len > _target->size) return OtaSinkError::TooLarge;
 
-    if (esp_ota_write(_handle, data, len) != ESP_OK) return OtaSinkError::WriteFailed;
+    // O erro do IDF entra no log: sem ele, "abortado: flash" nao distingue
+    // particao errada de timeout do controlador, e a investigacao vira palpite.
+    const esp_err_t err = esp_ota_write(_handle, data, len);
+    if (err != ESP_OK) {
+        FWUP_LOGE("ota", "esp_ota_write falhou em %u bytes, bloco de %u: %s",
+                  (unsigned)_written, (unsigned)len, esp_err_to_name(err));
+        return OtaSinkError::WriteFailed;
+    }
     if (!_sha.update(data, len)) return OtaSinkError::WriteFailed;
 
     _written += static_cast<uint32_t>(len);
