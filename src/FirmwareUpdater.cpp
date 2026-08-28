@@ -677,6 +677,17 @@ static void handleConfig(FirmwareUpdater::Impl& d, const char* payload, size_t) 
               incoming.config_version, incoming.ping_interval_s,
               incoming.ota_button_window_s,
               incoming.allow_ota_on_gprs ? "sim" : "nao");
+    // Um endereco de API novo e gravado na hora: e o unico caminho pelo qual um
+    // dispositivo ja provisionado aprende que o servidor mudou de casa.
+    if (incoming.api_base_url[0] != ' ') {
+        char atual[kMaxUrlLen] = {};
+        d.store->apiBaseUrl(atual, sizeof(atual));
+        if (strcmp(atual, incoming.api_base_url) != 0 &&
+            d.store->setApiBaseUrl(incoming.api_base_url)) {
+            FWUP_LOGI("cfg", "api passa a ser %s", incoming.api_base_url);
+        }
+    }
+
     if (d.cb_config != nullptr) d.cb_config(d.remote_cfg, payload, d.cb_config_ctx);
 }
 

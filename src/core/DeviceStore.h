@@ -46,6 +46,14 @@ public:
     bool mqttPass(char* out, size_t cap) const;
     bool apiBaseUrl(char* out, size_t cap) const;
 
+    // Regrava o endereco da API depois do provisionamento.
+    //
+    // O valor entregue no provisionamento fica na flash para sempre, e um
+    // servidor que mude de casa deixaria a frota inteira orfa - sem caminho de
+    // volta que nao fosse reprovisionar cada aparelho. Com isto, a configuracao
+    // remota consegue corrigi-lo.
+    bool setApiBaseUrl(const char* url);
+
     bool topics(char* ping, size_t ping_cap,
                 char* update, size_t update_cap,
                 char* config, size_t config_cap) const;

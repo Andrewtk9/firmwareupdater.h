@@ -178,6 +178,16 @@ struct RemoteConfig {
     bool     has_sensor_interval    = false;
     bool     applied_at_required    = false;
     int64_t  server_time            = 0;  // extension: 0 = absent
+
+    // Endereco novo da API, quando o servidor precisa mudar de casa.
+    //
+    // Sem isto o unico jeito de um dispositivo aprender um endereco novo seria
+    // reprovisionar, o que exige desbloquear no servidor e apagar a NVS dele -
+    // inviavel para uma frota em campo, e por isso um endereco errado gravado no
+    // provisionamento ficava para sempre.
+    //
+    // Vazio quando ausente, que e o caso comum.
+    char api_base_url[kMaxUrlLen] = {};
 };
 
 struct OtaSlotInfo {
