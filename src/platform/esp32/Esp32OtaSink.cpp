@@ -65,11 +65,18 @@ OtaSinkError Esp32OtaSink::begin(uint32_t expected_size) {
 }
 
 OtaSinkError Esp32OtaSink::write(const uint8_t* data, size_t len) {
-    if (!_open) return OtaSinkError::NotOpen;
+    if (!_open) {
+        FWUP_LOGE("ota", "escrita com a particao fechada, em %u bytes", (unsigned)_written);
+        return OtaSinkError::NotOpen;
+    }
     if (len == 0) return OtaSinkError::Ok;
     if (data == nullptr) return OtaSinkError::WriteFailed;
 
-    if (_target != nullptr && _written + len > _target->size) return OtaSinkError::TooLarge;
+    if (_target != nullptr && _written + len > _target->size) {
+        FWUP_LOGE("ota", "bloco excede a particao: %u + %u > %u",
+                  (unsigned)_written, (unsigned)len, (unsigned)_target->size);
+        return OtaSinkError::TooLarge;
+    }
 
     // O erro do IDF entra no log: sem ele, "abortado: flash" nao distingue
     // particao errada de timeout do controlador, e a investigacao vira palpite.
@@ -79,7 +86,14 @@ OtaSinkError Esp32OtaSink::write(const uint8_t* data, size_t len) {
                   (unsigned)_written, (unsigned)len, esp_err_to_name(err));
         return OtaSinkError::WriteFailed;
     }
-    if (!_sha.update(data, len)) return OtaSinkError::WriteFailed;
+    // O digest e alimentado em streaming pelo mbedtls, que no ESP32 usa o
+    // acelerador de hardware - o mesmo periferico que o TLS da sessao MQTT e o
+    // do proprio download usam. Uma falha aqui aparecia como se fosse da flash.
+    if (!_sha.update(data, len)) {
+        FWUP_LOGE("ota", "sha256 falhou em %u bytes, bloco de %u",
+                  (unsigned)_written, (unsigned)len);
+        return OtaSinkError::WriteFailed;
+    }
 
     _written += static_cast<uint32_t>(len);
     return OtaSinkError::Ok;
