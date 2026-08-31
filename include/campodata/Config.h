@@ -151,6 +151,13 @@ struct TopicConfig {
 struct OtaPolicy {
     OtaLinkPolicy link_policy        = OtaLinkPolicy::WifiOnly;
     bool          allow_ota_on_gprs  = false;
+
+    // Encerra a sessao MQTT enquanto o firmware e baixado e gravado.
+    //
+    // No celular, porque HTTP e MQTT nao podem dividir o link. No WiFi, porque o
+    // digest usa o acelerador de SHA por hardware, que o TLS da sessao tambem
+    // usa - e a disputa faz o calculo falhar no meio do download.
+    bool          pause_mqtt_during_download = true;
     bool          require_button     = true;
 
     // mandatory may waive the button. It never waives the link policy: that
