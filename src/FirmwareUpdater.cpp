@@ -778,6 +778,22 @@ static void failOta(FirmwareUpdater::Impl& d, AbortReason reason) {
     d.setOtaState(OtaState::Failed, reason);
 }
 
+// Tira a sessao MQTT do caminho antes do download, e a devolve depois.
+//
+// No celular o motivo e o link: HTTP e MQTT nao podem dividi-lo. No WiFi o
+// motivo e outro e so apareceu em campo - o digest do firmware e calculado pelo
+// mbedtls, que no ESP32 usa o acelerador de SHA por hardware, o mesmo periferico
+// que o TLS da sessao MQTT usa. Com as duas coisas ao mesmo tempo o calculo
+// falha em pontos variaveis do download: 167 KB, 557 KB, 688 KB, 753 KB, sempre
+// diferente. A sessao volta assim que a gravacao termina.
+static void pauseMqttForOta(FirmwareUpdater::Impl& d) {
+    if (!d.cfg.ota.pause_mqtt_during_download || !d.mqtt_started) return;
+    FWUP_LOGI("ota", "encerrando a sessao MQTT durante o download");
+    d.mqtt->end();
+    d.mqtt_started = false;
+    d.was_connected = false;
+}
+
 static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
     // The server builds every download URL from one configured base, so a
     // link that cannot do TLS may be handed an https:// address.
@@ -785,6 +801,8 @@ static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
         failOta(d, AbortReason::NoWifi);
         return;
     }
+
+    pauseMqttForOta(d);
 
     if (d.ota.begin(d.order.size_bytes) != OtaSinkError::Ok) {
         failOta(d, AbortReason::Flash);
