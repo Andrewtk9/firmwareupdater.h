@@ -149,6 +149,14 @@ struct FirmwareUpdater::Impl {
     uint32_t last_gsm_clock_ms = 0;
     uint32_t last_mqtt_try = 0;
     bool     mqtt_started  = false;
+
+    // Sessao desligada de proposito enquanto o firmware baixa.
+    //
+    // Sem esta flag, zerar mqtt_started para encerrar a sessao e exatamente o
+    // sinal que faz o mqttStep abrir outra na passada seguinte - a pausa se
+    // anulava sozinha, e o log mostrava "encerrando a sessao" e "conectado" com
+    // segundos de diferenca.
+    bool     mqtt_paused_for_ota = false;
     bool     was_connected = false;
 
     MqttStatus mqtt_status = MqttStatus::Ok;
@@ -549,6 +557,7 @@ static void applySubscriptions(FirmwareUpdater::Impl& d) {
 
 static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
     if (!d.store->isProvisioned() || !d.topics.ready()) return;
+    if (d.mqtt_paused_for_ota) return;
 
     const bool up = d.mqtt->connected();
 
@@ -768,9 +777,12 @@ static bool buttonPressed(FirmwareUpdater::Impl& d) {
     return d.cfg.button.button_active_low ? (level == LOW) : (level == HIGH);
 }
 
+static void resumeMqttAfterOta(FirmwareUpdater::Impl& d);
+
 static void failOta(FirmwareUpdater::Impl& d, AbortReason reason) {
     FWUP_LOGE("ota", "abortado: %s (escritos %u bytes)",
               toString(reason), d.ota.written());
+    resumeMqttAfterOta(d);
     d.ota.abort();
     d.http->endDownload();
     d.has_order = false;
@@ -790,8 +802,18 @@ static void pauseMqttForOta(FirmwareUpdater::Impl& d) {
     if (!d.cfg.ota.pause_mqtt_during_download || !d.mqtt_started) return;
     FWUP_LOGI("ota", "encerrando a sessao MQTT durante o download");
     d.mqtt->end();
-    d.mqtt_started = false;
-    d.was_connected = false;
+    d.mqtt_started       = false;
+    d.was_connected      = false;
+    d.mqtt_paused_for_ota = true;
+}
+
+// Devolve a sessao depois que a gravacao termina, de qualquer maneira que tenha
+// terminado.
+static void resumeMqttAfterOta(FirmwareUpdater::Impl& d) {
+    if (!d.mqtt_paused_for_ota) return;
+    d.mqtt_paused_for_ota = false;
+    d.mqtt_backoff.reset();
+    FWUP_LOGI("ota", "devolvendo a sessao MQTT");
 }
 
 static void startDownload(FirmwareUpdater::Impl& d, uint32_t now) {
