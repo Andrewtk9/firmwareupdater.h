@@ -1371,6 +1371,10 @@ bool FirmwareUpdater::httpPost(const char* url, Stream& body, uint32_t len,
 
 #endif  // FWUP_TARGET_ARDUINO
 
+uint32_t FirmwareUpdater::lastPingMs() const {
+    return _impl->last_ping_ms;
+}
+
 void FirmwareUpdater::onPingExtend(PingExtendCb cb, void* ctx) {
     _impl->cb_ping_ctx = ctx;
     _impl->cb_ping     = cb;
