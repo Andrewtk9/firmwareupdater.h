@@ -24,6 +24,13 @@ public:
     HttpError postJson(const char* url, const char* body,
                        char* out, size_t cap, HttpResponse& res) override;
 
+    HttpError get(const char* url, char* out, size_t cap, HttpResponse& res) override;
+
+    HttpError postStream(const char* url, const char* content_type,
+                         const char* extra_headers,
+                         BodyReader reader, void* ctx, uint32_t total_len,
+                         char* out, size_t cap, HttpResponse& res) override;
+
     HttpError beginDownload(const char* url, uint32_t range_offset) override;
     HttpError readChunk(uint8_t* out, size_t cap, size_t& got) override;
     void      endDownload() override;

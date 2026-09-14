@@ -1314,6 +1314,63 @@ void FirmwareUpdater::onMqttDisconnect(MqttEventCb cb, void* ctx) {
     _impl->cb_disc_ctx   = ctx;
     _impl->cb_disconnect = cb;
 }
+bool FirmwareUpdater::httpGet(const char* url, char* out, size_t cap, int* status) {
+    Impl& d = *_impl;
+    if (d.http == nullptr || url == nullptr) return false;
+
+    // Uma atualizacao em curso ja detem o link no celular; disputar aqui so
+    // faria a chamada falhar de um jeito mais dificil de explicar.
+    if (isBusy()) {
+        FWUP_LOGW("http", "GET recusado: atualizacao em curso");
+        return false;
+    }
+
+    HttpResponse res;
+    const HttpError erro = d.http->get(url, out, cap, res);
+    if (status != nullptr) *status = res.status;
+
+    return erro == HttpError::Ok && res.status >= 200 && res.status < 300;
+}
+
+#if FWUP_TARGET_ARDUINO
+
+namespace {
+
+int lerDeStream(uint8_t* out, size_t cap, void* ctx) {
+    Stream* fonte = static_cast<Stream*>(ctx);
+    if (fonte == nullptr) return -1;
+    return fonte->readBytes(reinterpret_cast<char*>(out), cap);
+}
+
+}  // namespace
+
+bool FirmwareUpdater::httpPost(const char* url, Stream& body, uint32_t len,
+                               const char* content_type,
+                               const char* extra_headers,
+                               String* resposta, int* status) {
+    Impl& d = *_impl;
+    if (d.http == nullptr || url == nullptr || len == 0) return false;
+
+    if (isBusy()) {
+        FWUP_LOGW("http", "POST recusado: atualizacao em curso");
+        return false;
+    }
+
+    char         corpo[256] = {};
+    HttpResponse res;
+
+    const HttpError erro = d.http->postStream(url, content_type, extra_headers,
+                                              lerDeStream, &body, len,
+                                              corpo, sizeof(corpo), res);
+
+    if (status != nullptr)   *status   = res.status;
+    if (resposta != nullptr) *resposta = corpo;
+
+    return erro == HttpError::Ok && res.status >= 200 && res.status < 300;
+}
+
+#endif  // FWUP_TARGET_ARDUINO
+
 void FirmwareUpdater::onPingExtend(PingExtendCb cb, void* ctx) {
     _impl->cb_ping_ctx = ctx;
     _impl->cb_ping     = cb;
