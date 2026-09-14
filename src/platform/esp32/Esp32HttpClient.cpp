@@ -83,6 +83,144 @@ HttpError Esp32HttpClient::postJson(const char* url, const char* body,
     return result;
 }
 
+namespace {
+
+// "Nome: valor\r\n" repetido, que e o formato que o codigo antigo ja montava.
+void aplicarCabecalhos(esp_http_client_handle_t c, const char* linhas) {
+    if (linhas == nullptr) return;
+
+    char buf[256];
+    const char* p = linhas;
+
+    while (*p != 0) {
+        const char* fim = strstr(p, "\r\n");
+        const size_t n  = (fim != nullptr) ? (size_t)(fim - p) : strlen(p);
+
+        if (n > 0 && n < sizeof(buf)) {
+            memcpy(buf, p, n);
+            buf[n] = 0;
+
+            char* sep = strchr(buf, ':');
+            if (sep != nullptr) {
+                *sep = 0;
+                char* valor = sep + 1;
+                while (*valor == ' ') valor++;
+                esp_http_client_set_header(c, buf, valor);
+            }
+        }
+
+        if (fim == nullptr) break;
+        p = fim + 2;
+    }
+}
+
+}  // namespace
+
+HttpError Esp32HttpClient::get(const char* url, char* out, size_t cap,
+                               HttpResponse& res) {
+    if (url == nullptr) return HttpError::Transport;
+
+    res = HttpResponse{};
+    if (out != nullptr && cap > 0) out[0] = 0;
+
+    esp_http_client_handle_t c = make(url, HTTP_METHOD_GET);
+    if (c == nullptr) return HttpError::Transport;
+
+    HttpError result = HttpError::Ok;
+
+    if (esp_http_client_open(c, 0) != ESP_OK) {
+        esp_http_client_cleanup(c);
+        return HttpError::ConnectFailed;
+    }
+
+    if (esp_http_client_fetch_headers(c) < 0) {
+        result = HttpError::Transport;
+    } else {
+        res.status = esp_http_client_get_status_code(c);
+        _status    = res.status;
+
+        if (out != nullptr && cap > 1) {
+            const int lido = esp_http_client_read(c, out, (int)(cap - 1));
+            const size_t n = (lido > 0) ? (size_t)lido : 0;
+            out[n]       = 0;
+            res.body_len = n;
+        }
+    }
+
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return result;
+}
+
+HttpError Esp32HttpClient::postStream(const char* url, const char* content_type,
+                                      const char* extra_headers,
+                                      BodyReader reader, void* ctx,
+                                      uint32_t total_len,
+                                      char* out, size_t cap, HttpResponse& res) {
+    if (url == nullptr || reader == nullptr) return HttpError::Transport;
+
+    res = HttpResponse{};
+    if (out != nullptr && cap > 0) out[0] = 0;
+
+    esp_http_client_handle_t c = make(url, HTTP_METHOD_POST);
+    if (c == nullptr) return HttpError::Transport;
+
+    esp_http_client_set_header(c, "Content-Type",
+                               (content_type != nullptr)
+                                   ? content_type
+                                   : "application/octet-stream");
+    aplicarCabecalhos(c, extra_headers);
+
+    // O Content-Length precisa ser conhecido antes do corpo, por isso o tamanho
+    // e exigido em vez de deduzido.
+    if (esp_http_client_open(c, (int)total_len) != ESP_OK) {
+        esp_http_client_cleanup(c);
+        return HttpError::ConnectFailed;
+    }
+
+    uint8_t   buf[512];
+    uint32_t  enviados = 0;
+    HttpError result   = HttpError::Ok;
+
+    while (enviados < total_len) {
+        const int lido = reader(buf, sizeof(buf), ctx);
+        if (lido < 0) { result = HttpError::Transport; break; }
+        if (lido == 0) break;
+
+        if (esp_http_client_write(c, (const char*)buf, lido) != lido) {
+            result = HttpError::Transport;
+            break;
+        }
+        enviados += (uint32_t)lido;
+    }
+
+    // Menos bytes que o Content-Length anunciado deixaria o servidor esperando
+    // para sempre pelo resto.
+    if (result == HttpError::Ok && enviados != total_len) {
+        result = HttpError::Transport;
+    }
+
+    if (result == HttpError::Ok) {
+        if (esp_http_client_fetch_headers(c) < 0) {
+            result = HttpError::Transport;
+        } else {
+            res.status = esp_http_client_get_status_code(c);
+            _status    = res.status;
+
+            if (out != nullptr && cap > 1) {
+                const int lido = esp_http_client_read(c, out, (int)(cap - 1));
+                const size_t n = (lido > 0) ? (size_t)lido : 0;
+                out[n]       = 0;
+                res.body_len = n;
+            }
+        }
+    }
+
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return result;
+}
+
 HttpError Esp32HttpClient::beginDownload(const char* url, uint32_t range_offset) {
     if (_dl != nullptr) return HttpError::Transport;
     if (url == nullptr) return HttpError::Transport;

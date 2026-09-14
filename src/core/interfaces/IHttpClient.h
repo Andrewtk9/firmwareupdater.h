@@ -38,6 +38,30 @@ public:
     virtual uint32_t resumedAt() const = 0;
     virtual bool     downloadOpen() const = 0;
 
+    // Fornece o corpo de um POST em pedacos. Devolve quantos bytes escreveu em
+    // `out`, 0 no fim, negativo em erro.
+    //
+    // E um callback, e nao um buffer, porque o corpo tipico e um arquivo grande
+    // que nao cabe na RAM - e porque assim a biblioteca nao precisa saber de
+    // onde ele vem.
+    using BodyReader = int (*)(uint8_t* out, size_t cap, void* ctx);
+
+    // GET simples para a aplicacao. Corpo truncado em `cap`, sempre terminado
+    // em NUL; o status vem em `res` mesmo quando o corpo nao cabe.
+    virtual HttpError get(const char* url, char* out, size_t cap,
+                          HttpResponse& res) = 0;
+
+    // POST com corpo transmitido em fluxo. `extra_headers` sao linhas prontas
+    // POST com corpo transmitido em fluxo. extra_headers sao linhas
+    // prontas, cada uma no formato Nome: valor terminada em CRLF.
+    // total_len e obrigatorio porque vai no Content-Length, que o
+    // servidor precisa antes do corpo.
+    // Content-Length, que o servidor precisa antes do corpo.
+    virtual HttpError postStream(const char* url, const char* content_type,
+                                 const char* extra_headers,
+                                 BodyReader reader, void* ctx, uint32_t total_len,
+                                 char* out, size_t cap, HttpResponse& res) = 0;
+
     // Whether this transport can negotiate TLS at all. False on the cellular
     // stack, which is why an https:// order URL has to be checked before use.
     virtual bool supportsTls() const = 0;

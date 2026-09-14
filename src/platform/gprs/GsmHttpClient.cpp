@@ -175,6 +175,140 @@ HttpError GsmHttpClient::postJson(const char* url, const char* body,
     return HttpError::Ok;
 }
 
+HttpError GsmHttpClient::get(const char* url, char* out, size_t cap,
+                             HttpResponse& res) {
+    res = HttpResponse{};
+    if (out != nullptr && cap > 0) out[0] = 0;
+
+    if (!url::fetchable(url, supportsTls())) return HttpError::ConnectFailed;
+
+    Alvo alvo;
+    if (!separar(url, alvo)) return HttpError::ConnectFailed;
+
+    TinyGsmClient* cliente = nullptr;
+    if (!abrir(alvo, cliente)) return HttpError::ConnectFailed;
+
+    cliente->printf("GET %s HTTP/1.1\r\n", alvo.path);
+    cliente->printf("Host: %s\r\n", alvo.host);
+    cliente->print("Connection: close\r\n\r\n");
+
+    const HttpError erro = lerCabecalhos(*cliente, 0);
+    if (erro != HttpError::Ok) {
+        _link.releaseHttp();
+        return erro;
+    }
+
+    size_t escrito = 0;
+    const uint32_t limite = millis() + kIdleTimeoutMs;
+
+    while (millis() < limite) {
+        if (cliente->available() > 0) {
+            const int c = cliente->read();
+            if (c < 0) break;
+            if (out != nullptr && escrito + 1 < cap) out[escrito] = (char)c;
+            escrito++;
+            continue;
+        }
+        if (!cliente->connected()) break;
+    }
+
+    if (out != nullptr && cap > 0) out[(escrito < cap) ? escrito : cap - 1] = 0;
+
+    res.status   = _status;
+    res.body_len = escrito;
+
+    _link.releaseHttp();
+    return HttpError::Ok;
+}
+
+HttpError GsmHttpClient::postStream(const char* url, const char* content_type,
+                                    const char* extra_headers,
+                                    BodyReader reader, void* ctx,
+                                    uint32_t total_len,
+                                    char* out, size_t cap, HttpResponse& res) {
+    res = HttpResponse{};
+    if (out != nullptr && cap > 0) out[0] = 0;
+
+    if (reader == nullptr) return HttpError::Transport;
+
+    if (!url::fetchable(url, supportsTls())) {
+        FWUP_LOGE("http", "URL exige TLS, indisponivel no GPRS: %s", url);
+        return HttpError::ConnectFailed;
+    }
+
+    Alvo alvo;
+    if (!separar(url, alvo)) return HttpError::ConnectFailed;
+
+    TinyGsmClient* cliente = nullptr;
+    if (!abrir(alvo, cliente)) return HttpError::ConnectFailed;
+
+    cliente->printf("POST %s HTTP/1.1\r\n", alvo.path);
+    cliente->printf("Host: %s\r\n", alvo.host);
+    cliente->print("Connection: close\r\n");
+    cliente->printf("Content-Type: %s\r\n",
+                    (content_type != nullptr) ? content_type
+                                              : "application/octet-stream");
+    cliente->printf("Content-Length: %lu\r\n", (unsigned long)total_len);
+    if (extra_headers != nullptr) cliente->print(extra_headers);
+    cliente->print("\r\n");
+
+    // Blocos pequenos: o buffer do modem e curto, e um bloco grande so aumenta
+    // o tempo que a escrita fica presa sem ceder a CPU.
+    uint8_t  buf[256];
+    uint32_t enviados = 0;
+    bool     ok       = true;
+
+    while (enviados < total_len) {
+        const int lido = reader(buf, sizeof(buf), ctx);
+        if (lido < 0) { ok = false; break; }
+        if (lido == 0) break;
+
+        if (cliente->write(buf, (size_t)lido) != (size_t)lido) { ok = false; break; }
+        enviados += (uint32_t)lido;
+
+        // Cede a CPU entre blocos; nao e temporizacao.
+        delay(0);
+    }
+
+    if (!ok || enviados != total_len) {
+        FWUP_LOGE("http", "corpo incompleto: %lu de %lu bytes",
+                  (unsigned long)enviados, (unsigned long)total_len);
+        _link.releaseHttp();
+        return HttpError::Transport;
+    }
+
+    const HttpError erro = lerCabecalhos(*cliente, 0);
+    if (erro != HttpError::Ok) {
+        _link.releaseHttp();
+        return erro;
+    }
+
+    size_t escrito = 0;
+    const uint32_t limite = millis() + kIdleTimeoutMs;
+
+    while (millis() < limite) {
+        if (cliente->available() > 0) {
+            const int c = cliente->read();
+            if (c < 0) break;
+            if (out != nullptr && escrito + 1 < cap) out[escrito] = (char)c;
+            escrito++;
+            continue;
+        }
+        if (!cliente->connected()) break;
+    }
+
+    if (out != nullptr && cap > 0) out[(escrito < cap) ? escrito : cap - 1] = 0;
+
+    res.status   = _status;
+    res.body_len = escrito;
+
+    FWUP_LOGI("http", "POST %s -> %d (%lu bytes enviados)",
+              alvo.path, _status, (unsigned long)enviados);
+
+    _link.releaseHttp();
+    return HttpError::Ok;
+}
+
 HttpError GsmHttpClient::beginDownload(const char* url, uint32_t range_offset) {
     endDownload();
 

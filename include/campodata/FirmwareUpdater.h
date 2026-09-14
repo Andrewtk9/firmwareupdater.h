@@ -145,6 +145,33 @@ public:
     // provisioned, since the device_id comes from the server.
     bool appTopic(const char* suffix, char* out, size_t cap) const;
 
+    // -------------------------------------------------------------- http ---
+    //
+    // HTTP da aplicacao, pelo link ativo. Existe porque o modem passou a ser da
+    // biblioteca: um projeto que abrisse o proprio socket celular ao lado
+    // voltaria a disputar mux com o MQTT, que e a falha que derrubava a sessao
+    // a cada poucos minutos.
+    //
+    // No celular as duas chamadas passam pelo mesmo lease do OTA, entao o MQTT
+    // sai de cena antes e volta depois - HTTP e MQTT nunca dividem o link.
+    // Ambas sao recusadas enquanto isBusy(), para nao competir com uma
+    // atualizacao em curso.
+
+    // Corpo truncado em cap e sempre terminado em NUL.
+    bool httpGet(const char* url, char* out, size_t cap, int* status = nullptr);
+
+#if FWUP_TARGET_ARDUINO
+    // POST com o corpo lido de um Stream - tipicamente um File do cartao, que
+    // continua sendo do projeto: a biblioteca nunca aprende o que e SD.
+    //
+    // len e obrigatorio porque vai no Content-Length, que o servidor precisa
+    // antes do corpo.
+    bool httpPost(const char* url, Stream& body, uint32_t len,
+                  const char* content_type,
+                  const char* extra_headers = nullptr,
+                  String* resposta = nullptr, int* status = nullptr);
+#endif
+
     // ---------------------------------------------------------- callbacks --
 
     void onPingExtend(PingExtendCb cb, void* ctx);
