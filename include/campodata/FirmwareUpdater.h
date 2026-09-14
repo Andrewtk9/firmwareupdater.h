@@ -93,6 +93,15 @@ public:
     SleepBlock sleepBlock() const;
     bool       canSleep() const;
 
+    // Qual link esta carregando trafego agora, e se ha algum.
+    //
+    // Nao e a mesma pergunta que mqttConnected(): um projeto pode precisar
+    // saber que o radio subiu antes de acionar outra carga pesada - no
+    // telemetria, as cameras so disparam depois que o modem termina de bootar,
+    // porque o inrush do SIM800L somado a elas causava brownout.
+    LinkType activeLink() const;
+    bool     linkReady() const;
+
     // -------------------------------------------------------------- mqtt ---
     //
     // The full client surface, so a project migrating from PubSubClient or
