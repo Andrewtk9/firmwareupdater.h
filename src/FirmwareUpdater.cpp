@@ -1371,6 +1371,14 @@ bool FirmwareUpdater::httpPost(const char* url, Stream& body, uint32_t len,
 
 #endif  // FWUP_TARGET_ARDUINO
 
+LinkType FirmwareUpdater::activeLink() const {
+    return campodata::activeLink(*_impl);
+}
+
+bool FirmwareUpdater::linkReady() const {
+    return campodata::activeLink(*_impl) != LinkType::None;
+}
+
 uint32_t FirmwareUpdater::lastPingMs() const {
     return _impl->last_ping_ms;
 }
