@@ -105,6 +105,16 @@ public:
     MqttStatus  mqttStatus() const;
     const char* clientId() const;
 
+    // millis() do ultimo ping publicado, ou 0 antes do primeiro.
+    //
+    // Serve para um projeto escalonar as proprias publicacoes periodicas em
+    // relacao ao heartbeat da biblioteca, em vez de disputarem o link no mesmo
+    // instante - o que num enlace 2G custa caro.
+    //
+    // Existe porque o gancho de extensao do ping nao serve para isso: ele e
+    // suprimido quando ping_strict esta ligado, que e o padrao.
+    uint32_t lastPingMs() const;
+
     // QoS defaults to 1, which is what the spec asks for on its own topics.
     // A request above capabilities().mqtt_max_publish_qos is downgraded rather
     // than refused, and mqttStatus() reports it.
