@@ -1371,6 +1371,26 @@ bool FirmwareUpdater::httpPost(const char* url, Stream& body, uint32_t len,
 
 #endif  // FWUP_TARGET_ARDUINO
 
+bool FirmwareUpdater::imei(char* out, size_t cap) const {
+#if defined(FWUP_ENABLE_GPRS)
+    return _impl->gsm.imei(out, cap);
+#else
+    (void)cap;
+    if (out != nullptr && cap > 0) out[0] = 0;
+    return false;
+#endif
+}
+
+bool FirmwareUpdater::iccid(char* out, size_t cap) const {
+#if defined(FWUP_ENABLE_GPRS)
+    return _impl->gsm.iccid(out, cap);
+#else
+    (void)cap;
+    if (out != nullptr && cap > 0) out[0] = 0;
+    return false;
+#endif
+}
+
 LinkType FirmwareUpdater::activeLink() const {
     return campodata::activeLink(*_impl);
 }

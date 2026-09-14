@@ -49,6 +49,15 @@ public:
 
     int16_t rssiDbm();
 
+    // Identidade do modem e do chip SIM.
+    //
+    // Nao basta chamar o TinyGSM: neste SIM800L V2 o getIMEI() volta vazio logo
+    // depois do begin, e foi por isso que a frota acabou com um leitor manual
+    // por AT no projeto. O caminho manual vive aqui agora - varre a resposta
+    // atras da sequencia valida, tolerando URC e fim de linha estranho.
+    bool imei(char* out, size_t cap);
+    bool iccid(char* out, size_t cap);
+
     // Local time from the network, with the offset the modem reports. Discarding
     // that offset is what silently stored local time as UTC across the fleet.
     bool networkTime(int& year, int& month, int& day, int& hour, int& minute,

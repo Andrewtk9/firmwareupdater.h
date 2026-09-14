@@ -102,6 +102,14 @@ public:
     LinkType activeLink() const;
     bool     linkReady() const;
 
+    // Identidade do modem e do chip SIM, quando ha link celular.
+    //
+    // Falso num aparelho sem modem, ou antes de ele responder. O projeto pede a
+    // biblioteca em vez de falar com o modem: um segundo dono da UART e o que
+    // fazia comandos AT colidirem.
+    bool imei(char* out, size_t cap) const;
+    bool iccid(char* out, size_t cap) const;
+
     // -------------------------------------------------------------- mqtt ---
     //
     // The full client surface, so a project migrating from PubSubClient or
