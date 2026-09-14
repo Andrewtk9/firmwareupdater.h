@@ -165,6 +165,73 @@ void GsmLink::releaseHttp() {
     if (_resume != nullptr) _resume(_gate_ctx);
 }
 
+namespace {
+
+// Copia a primeira sequencia de digitos com exatamente `exatos` caracteres.
+// Zero em `exatos` aceita qualquer sequencia com pelo menos `minimo`.
+bool extrairSequencia(const String& resposta, char* out, size_t cap,
+                      size_t exatos, size_t minimo, bool aceita_f) {
+    String d;
+
+    for (size_t i = 0; i < resposta.length(); i++) {
+        const char c = resposta[i];
+        const bool digito = (c >= 0x30 && c <= 0x39) ||
+                            (aceita_f && (c == 0x46 || c == 0x66));
+
+        if (digito) {
+            d += c;
+            continue;
+        }
+
+        if (exatos > 0 && d.length() == exatos) break;
+        if (exatos == 0 && d.length() >= minimo) break;
+        d = "";
+    }
+
+    const bool ok = (exatos > 0) ? (d.length() == exatos) : (d.length() >= minimo);
+    if (!ok || d.length() + 1 > cap) return false;
+
+    snprintf(out, cap, "%s", d.c_str());
+    return true;
+}
+
+}  // namespace
+
+bool GsmLink::imei(char* out, size_t cap) {
+    if (_modem == nullptr || out == nullptr || cap == 0) return false;
+    out[0] = 0;
+
+    const String direto = _modem->getIMEI();
+    if (direto.length() == 15 && direto.length() + 1 <= cap) {
+        snprintf(out, cap, "%s", direto.c_str());
+        return true;
+    }
+
+    String resposta;
+    _modem->sendAT("+GSN");
+    if (_modem->waitResponse(2000L, resposta) != 1) return false;
+
+    return extrairSequencia(resposta, out, cap, 15, 0, false);
+}
+
+bool GsmLink::iccid(char* out, size_t cap) {
+    if (_modem == nullptr || out == nullptr || cap == 0) return false;
+    out[0] = 0;
+
+    const String direto = _modem->getSimCCID();
+    if (direto.length() >= 18 && direto.length() + 1 <= cap) {
+        snprintf(out, cap, "%s", direto.c_str());
+        return true;
+    }
+
+    String resposta;
+    _modem->sendAT("+CCID");
+    if (_modem->waitResponse(2000L, resposta) != 1) return false;
+
+    // O ICCID costuma ter 19 ou 20 caracteres e as vezes termina em F.
+    return extrairSequencia(resposta, out, cap, 0, 18, true);
+}
+
 int16_t GsmLink::rssiDbm() {
     if (_modem == nullptr) return 0;
 
