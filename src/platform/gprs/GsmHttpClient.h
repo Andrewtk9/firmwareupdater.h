@@ -2,6 +2,7 @@
 
 #if defined(FWUP_ENABLE_GPRS)
 
+#include "core/ChunkedDecoder.h"
 #include "core/interfaces/IHttpClient.h"
 #include "platform/gprs/GsmLink.h"
 
@@ -56,6 +57,14 @@ private:
     bool      abrir(const Alvo& alvo, TinyGsmClient*& cliente);
     HttpError lerCabecalhos(TinyGsmClient& cliente, uint32_t range_offset);
 
+    // Corpo sem enquadramento, so com o que ja chegou: le ate cap e volta. `fim`
+    // diz que o corpo terminou pelo protocolo - Content-Length atingido ou bloco
+    // final do chunked - e nao por falta de dados.
+    size_t lerCorpo(TinyGsmClient& cliente, uint8_t* out, size_t cap, bool& fim);
+
+    // Corpo inteiro de uma resposta pequena, sempre terminado em NUL.
+    size_t lerResposta(TinyGsmClient& cliente, char* out, size_t cap);
+
     GsmLink& _link;
 
     int      _status     = 0;
@@ -64,6 +73,10 @@ private:
     uint32_t _recebido   = 0;
     bool     _open       = false;
     uint32_t _ultimo_byte = 0;
+
+    // O Spring atras do nginx responde JSON em chunked, sem Content-Length.
+    bool           _chunked = false;
+    ChunkedDecoder _chunks;
 };
 
 }  // namespace campodata

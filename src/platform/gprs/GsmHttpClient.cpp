@@ -71,6 +71,9 @@ HttpError GsmHttpClient::lerCabecalhos(TinyGsmClient& cliente, uint32_t range_of
     _status     = 0;
     _length     = 0;
     _resumed_at = 0;
+    _recebido   = 0;
+    _chunked    = false;
+    _chunks.reset();
 
     const uint32_t limite = millis() + kHeaderTimeoutMs;
     char linha[160];
@@ -104,6 +107,13 @@ HttpError GsmHttpClient::lerCabecalhos(TinyGsmClient& cliente, uint32_t range_of
 
         if (strncasecmp(linha, "Content-Length:", 15) == 0) {
             _length = strtoul(linha + 15, nullptr, 10);
+        } else if (strncasecmp(linha, "Transfer-Encoding:", 18) == 0) {
+            for (const char* p = linha + 18; *p != '\0'; ++p) {
+                if (strncasecmp(p, "chunked", 7) == 0) {
+                    _chunked = true;
+                    break;
+                }
+            }
         } else if (strncasecmp(linha, "Content-Range:", 14) == 0) {
             const char* traco = strchr(linha, ' ');
             const char* ini   = (traco != nullptr) ? strchr(traco, '=') : nullptr;
@@ -118,6 +128,83 @@ HttpError GsmHttpClient::lerCabecalhos(TinyGsmClient& cliente, uint32_t range_of
     }
 
     return HttpError::Timeout;
+}
+
+size_t GsmHttpClient::lerCorpo(TinyGsmClient& cliente, uint8_t* out, size_t cap,
+                               bool& fim) {
+    fim = false;
+    size_t got = 0;
+
+    while (got < cap) {
+        // Com os dois cabecalhos, vale o chunked: e o que o servidor de fato
+        // mandou no fio.
+        if (_chunked) {
+            if (_chunks.done() || _chunks.invalid()) {
+                fim = true;
+                break;
+            }
+        } else if (_length > 0 && _recebido >= _length) {
+            fim = true;
+            break;
+        }
+
+        const int disponivel = cliente.available();
+        if (disponivel <= 0) break;
+
+        // Marcadores de tamanho, CRLF e trailer: um byte por vez, e nenhum deles
+        // vai para o corpo.
+        if (_chunked && !_chunks.inData()) {
+            const int c = cliente.read();
+            if (c < 0) break;
+            _chunks.feed(static_cast<char>(c));
+            continue;
+        }
+
+        size_t pedir = cap - got;
+        if (static_cast<size_t>(disponivel) < pedir) pedir = static_cast<size_t>(disponivel);
+        if (_chunked) {
+            if (_chunks.dataRemaining() < pedir) pedir = _chunks.dataRemaining();
+        } else if (_length > 0 && (_length - _recebido) < pedir) {
+            pedir = _length - _recebido;
+        }
+
+        const int lido = cliente.read(out + got, pedir);
+        if (lido <= 0) break;
+
+        got       += static_cast<size_t>(lido);
+        _recebido += static_cast<uint32_t>(lido);
+        if (_chunked) _chunks.consumeData(static_cast<uint32_t>(lido));
+    }
+
+    return got;
+}
+
+size_t GsmHttpClient::lerResposta(TinyGsmClient& cliente, char* out, size_t cap) {
+    uint8_t        bloco[128];
+    size_t         total  = 0;
+    const uint32_t limite = millis() + kIdleTimeoutMs;
+
+    while (millis() < limite) {
+        bool fim = false;
+        const size_t n = lerCorpo(cliente, bloco, sizeof(bloco), fim);
+
+        // O que nao cabe e descartado, mas o corpo continua sendo lido ate o fim.
+        if (out != nullptr && total + 1 < cap) {
+            const size_t cabe = cap - 1 - total;
+            memcpy(out + total, bloco, (n < cabe) ? n : cabe);
+        }
+        total += n;
+
+        if (fim) break;
+        if (n == 0 && !cliente.connected() && cliente.available() == 0) break;
+    }
+
+    if (_chunked && _chunks.invalid()) {
+        FWUP_LOGW("http", "enquadramento chunked invalido: corpo incompleto");
+    }
+
+    if (out != nullptr && cap > 0) out[(total < cap) ? total : cap - 1] = '\0';
+    return total;
 }
 
 HttpError GsmHttpClient::postJson(const char* url, const char* body,
@@ -150,23 +237,7 @@ HttpError GsmHttpClient::postJson(const char* url, const char* body,
         return erro;
     }
 
-    size_t escrito = 0;
-    const uint32_t limite = millis() + kIdleTimeoutMs;
-
-    while (millis() < limite) {
-        if (cliente->available() > 0) {
-            const int c = cliente->read();
-            if (c < 0) break;
-            if (out != nullptr && escrito + 1 < cap) out[escrito] = static_cast<char>(c);
-            escrito++;
-            continue;
-        }
-        if (!cliente->connected()) break;
-    }
-
-    if (out != nullptr && cap > 0) {
-        out[(escrito < cap) ? escrito : cap - 1] = '\0';
-    }
+    const size_t escrito = lerResposta(*cliente, out, cap);
 
     res.status   = _status;
     res.body_len = escrito;
@@ -198,21 +269,7 @@ HttpError GsmHttpClient::get(const char* url, char* out, size_t cap,
         return erro;
     }
 
-    size_t escrito = 0;
-    const uint32_t limite = millis() + kIdleTimeoutMs;
-
-    while (millis() < limite) {
-        if (cliente->available() > 0) {
-            const int c = cliente->read();
-            if (c < 0) break;
-            if (out != nullptr && escrito + 1 < cap) out[escrito] = (char)c;
-            escrito++;
-            continue;
-        }
-        if (!cliente->connected()) break;
-    }
-
-    if (out != nullptr && cap > 0) out[(escrito < cap) ? escrito : cap - 1] = 0;
+    const size_t escrito = lerResposta(*cliente, out, cap);
 
     res.status   = _status;
     res.body_len = escrito;
@@ -283,21 +340,7 @@ HttpError GsmHttpClient::postStream(const char* url, const char* content_type,
         return erro;
     }
 
-    size_t escrito = 0;
-    const uint32_t limite = millis() + kIdleTimeoutMs;
-
-    while (millis() < limite) {
-        if (cliente->available() > 0) {
-            const int c = cliente->read();
-            if (c < 0) break;
-            if (out != nullptr && escrito + 1 < cap) out[escrito] = (char)c;
-            escrito++;
-            continue;
-        }
-        if (!cliente->connected()) break;
-    }
-
-    if (out != nullptr && cap > 0) out[(escrito < cap) ? escrito : cap - 1] = 0;
+    const size_t escrito = lerResposta(*cliente, out, cap);
 
     res.status   = _status;
     res.body_len = escrito;
@@ -357,22 +400,23 @@ HttpError GsmHttpClient::readChunk(uint8_t* out, size_t cap, size_t& got) {
     TinyGsmClient* cliente = _link.httpClient();
     if (cliente == nullptr) return HttpError::Transport;
 
-    const int disponivel = cliente->available();
+    bool fim = false;
+    got = lerCorpo(*cliente, out, cap, fim);
 
-    if (disponivel > 0) {
-        const size_t pedir = (static_cast<size_t>(disponivel) < cap)
-                                 ? static_cast<size_t>(disponivel)
-                                 : cap;
-        got = cliente->read(out, pedir);
-        _recebido += got;
+    // Tamanho que nao e hexadecimal: o que viesse depois iria para a particao
+    // como se fosse firmware.
+    if (_chunked && _chunks.invalid()) return HttpError::Transport;
+
+    if (got > 0) {
         _ultimo_byte = millis();
-        return (got > 0) ? HttpError::Ok : HttpError::WouldBlock;
+        return HttpError::Ok;
     }
+    if (fim) return HttpError::Eof;
 
-    if (_length > 0 && _recebido >= _length) return HttpError::Eof;
-    if (!cliente->connected()) {
-        return (_length == 0 || _recebido >= _length) ? HttpError::Eof
-                                                      : HttpError::Transport;
+    if (!cliente->connected() && cliente->available() == 0) {
+        // Sem tamanho declarado, a conexao fechar e o fim do corpo. Com
+        // Content-Length ou chunked, e corpo truncado.
+        return (!_chunked && _length == 0) ? HttpError::Eof : HttpError::Transport;
     }
     if (millis() - _ultimo_byte > kIdleTimeoutMs) return HttpError::Timeout;
 
