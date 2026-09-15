@@ -13,6 +13,11 @@ constexpr uint32_t kAttachMs    = 30000;
 constexpr uint32_t kBackoffMs[] = {2000, 5000, 15000, 30000};
 constexpr uint32_t kHealthMs    = 30000;
 
+// Escada de recuperacao (ver reportMqttTransportFailure), contada em falhas
+// de transporte SEGUIDAS da sessao MQTT com o link declarado de pe.
+constexpr uint8_t kFalhasRefazerPdp = 2;
+constexpr uint8_t kFalhasResetModem = 4;
+
 #if defined(FWUP_GSM_TRACE_AT)
 // Espelha na Serial o que passa pela UART do modem, nos dois sentidos. So para
 // diagnostico: o volume e alto, e os pacotes MQTT aparecem crus no meio.
@@ -181,7 +186,10 @@ void GsmLink::loop(uint32_t now) {
             break;
 
         case State::Attaching:
-            if (_modem->isGprsConnected()) {
+            // _refazer_pdp: a sessao MQTT nao conseguiu abrir socket com o PDP
+            // aparentemente de pe. CGATT=1 e IP presente nao provam que a pilha
+            // TCP do modem funciona, entao o PDP e refeito de qualquer jeito.
+            if (!_refazer_pdp && _modem->isGprsConnected()) {
                 _failures       = 0;
                 _state          = State::Ready;
                 _last_health_ms = now;
@@ -201,6 +209,9 @@ void GsmLink::loop(uint32_t now) {
                 fail("PDP nao subiu", now);
                 return;
             }
+            // gprsConnect comeca com CIPSHUT, que fecha todos os mux. So se chega
+            // aqui com o MQTT pausado, por fail() ou resetModem().
+            _refazer_pdp = false;
             _modem->gprsConnect(_cfg.apn, _cfg.user, _cfg.pass);
             break;
 
@@ -246,6 +257,62 @@ void GsmLink::releaseHttp() {
 
     FWUP_LOGD("gprs", "link devolvido ao MQTT");
     if (_resume != nullptr) _resume(_gate_ctx);
+}
+
+void GsmLink::reportMqttTransportFailure(uint32_t now) {
+    if (_state != State::Ready || _http_leased) return;
+    if (_mqtt_falhas_seguidas < 255) _mqtt_falhas_seguidas++;
+
+    if (_mqtt_falhas_seguidas >= kFalhasResetModem) {
+        _mqtt_falhas_seguidas = 0;
+        resetModem();
+        return;
+    }
+    if (_mqtt_falhas_seguidas == kFalhasRefazerPdp) {
+        _refazer_pdp = true;
+        fail("MQTT nao abre com o PDP de pe; refazendo o PDP", now);
+    }
+}
+
+void GsmLink::reportMqttConnected() {
+    _mqtt_falhas_seguidas = 0;
+    _resets_modem         = 0;
+}
+
+void GsmLink::resetModem() {
+    // O que a v1 fazia e esta camada tinha deixado de fora. Sem reset, uma pilha
+    // IP travada no SIM800L nunca volta: o PDP "sobe" com o mesmo IP, o
+    // CIPSTART nao abre e o aparelho so reconecta desligando a placa. Visto em
+    // campo: 55 minutos em estado -2 ate reiniciar.
+    //
+    // Nao e o restart() do TinyGSM, que dorme com delay() e chama init() por
+    // dentro. O comando sai daqui e o Settling espera o modem voltar e refaz
+    // tudo, inclusive o ATE0 e os AT+CIP*, que nao sobrevivem ao reset. O
+    // SIM800L sai de fabrica em autobaud: o primeiro AT do Settling ressincroniza.
+    if (_pause != nullptr) {
+        _pause(_gate_ctx);
+        _mqtt_paused_by_fail = true;
+    }
+    _http_leased = false;
+    _refazer_pdp = true;
+
+    if ((_resets_modem & 1) == 0) {
+        FWUP_LOGW("gprs", "MQTT segue sem abrir; reiniciando o modem (AT+CFUN=1,1)");
+        _modem->sendAT(GF("+CFUN=1,1"));
+        _modem->waitResponse(10000L);
+    } else {
+        // Alternado com o reset completo, como na v1: as vezes o radio so sai do
+        // estado preso com CFUN=0/1, e nao com CFUN=1,1.
+        FWUP_LOGW("gprs", "reinicio anterior nao resolveu; desligando e religando o radio (CFUN=0/1)");
+        _modem->sendAT(GF("+CFUN=0"));
+        _modem->waitResponse(10000L);
+        _modem->sendAT(GF("+CFUN=1"));
+        _modem->waitResponse(10000L);
+    }
+    if (_resets_modem < 255) _resets_modem++;
+
+    _state = State::Settling;
+    _since = millis();   // os waitResponse acima podem ter levado segundos
 }
 
 namespace {

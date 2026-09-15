@@ -20,6 +20,11 @@ constexpr uint32_t kBackoffMs[] = {3000, 8000, 15000, 30000};
 // passa de 15 s e o cliente se desconecta sozinho achando que o broker sumiu.
 constexpr uint16_t kSocketTimeoutS = 30;
 
+// Prazo para abrir o TCP do broker. Deixado ao PubSubClient, o connect(host,
+// port) do TinyGSM usa 75 s, e cada tentativa que falha congela a task inteira
+// esse tempo - com o modem preso, cada volta da recuperacao levava minutos.
+constexpr int kConnectTimeoutS = 20;
+
 // Copia src para dst. Recusa em vez de truncar: um host, usuario ou senha
 // cortado daria uma conexao recusada sem nenhuma pista do motivo.
 bool copiar(char* dst, size_t cap, const char* src) {
@@ -166,6 +171,16 @@ bool GsmMqttClient::connected() const {
 bool GsmMqttClient::conectar() {
     if (!_link.up() || _link.httpBusy()) return false;
 
+    // Abre o TCP aqui, com prazo proprio: o PubSubClient pula o connect dele
+    // quando o socket ja esta aberto.
+    TinyGsmClient* socket = _link.mqttClient();
+    if (socket == nullptr) return false;
+    if (!socket->connected() && !socket->connect(_host, _cfg.port, kConnectTimeoutS)) {
+        FWUP_LOGW("mqtt", "TCP com %s:%u nao abriu em %d s", _host, _cfg.port, kConnectTimeoutS);
+        _link.reportMqttTransportFailure(millis());
+        return false;
+    }
+
     const bool ok = (_cfg.will_topic != nullptr)
                         ? _cliente.connect(_cfg.client_id, _cfg.username, _cfg.password,
                                            _cfg.will_topic, _cfg.will_qos,
@@ -174,10 +189,16 @@ bool GsmMqttClient::conectar() {
                         : _cliente.connect(_cfg.client_id, _cfg.username, _cfg.password);
 
     if (!ok) {
-        FWUP_LOGW("mqtt", "conexao recusada, estado %d", _cliente.state());
+        const int estado = _cliente.state();
+        FWUP_LOGW("mqtt", "conexao recusada, estado %d", estado);
+        // Negativo e transporte: TCP que nao abriu, conexao perdida, CONNACK que
+        // nao chegou. Positivo e o broker recusando - usuario, senha, client id -
+        // e reiniciar o modem nao mudaria nada.
+        if (estado < 0) _link.reportMqttTransportFailure(millis());
         return false;
     }
 
+    _link.reportMqttConnected();
     FWUP_LOGI("mqtt", "conectado a %s:%u", _cfg.host, _cfg.port);
 
     // Sessao limpa: o broker nao guarda assinatura nenhuma entre conexoes.

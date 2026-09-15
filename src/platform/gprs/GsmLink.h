@@ -41,6 +41,16 @@ public:
     void releaseHttp();
     bool httpBusy() const { return _http_leased; }
 
+    // Escada de recuperacao, alimentada pela sessao MQTT.
+    //
+    // Com o PDP de pe o link nao percebe sozinho uma pilha TCP travada no
+    // modem: CGATT continua 1 e o IP continua la, mas nenhum socket abre. So
+    // quem tenta abrir sabe. A sessao conta aqui cada falha de TRANSPORTE
+    // seguida (recusa do broker nao entra) e o link escala: refaz o PDP e, se
+    // nao bastar, reinicia o modem. O primeiro sucesso zera a escada.
+    void reportMqttTransportFailure(uint32_t now);
+    void reportMqttConnected();
+
     // A client bound to the HTTP mux. Only valid while the lease is held.
     TinyGsmClient* httpClient() { return _http_leased ? &_http : nullptr; }
 
@@ -76,6 +86,7 @@ private:
 
     void power(bool on);
     void fail(const char* why, uint32_t now);
+    void resetModem();
 
     GprsConfig _cfg;
     HardwareSerial* _serial = nullptr;
@@ -93,6 +104,11 @@ private:
 
     uint32_t _last_health_ms      = 0;
     bool     _mqtt_paused_by_fail = false;
+
+    // Ver reportMqttTransportFailure().
+    uint8_t _mqtt_falhas_seguidas = 0;
+    uint8_t _resets_modem         = 0;
+    bool    _refazer_pdp          = false;  // proximo Attaching roda gprsConnect mesmo com PDP "de pe"
 
     Gate  _pause  = nullptr;
     Gate  _resume = nullptr;
