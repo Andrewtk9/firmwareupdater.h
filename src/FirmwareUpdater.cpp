@@ -400,7 +400,10 @@ static void logActiveNetwork(FirmwareUpdater::Impl& d) {
 // no modo Both o link muda sozinho quando o WiFi vai e volta.
 static void bindTransports(FirmwareUpdater::Impl& d) {
 #if defined(FWUP_ENABLE_GPRS)
-    const bool usar_gprs = (activeLink(d) == LinkType::Gprs);
+    // Aparelho so GPRS nao tem para onde trocar: sem PDP ele fica sem link, e nao
+    // em WiFi. Trocar encerrava a sessao MQTT a cada oscilacao do modem.
+    const bool usar_gprs = (d.cfg.link_mode == LinkMode::Gprs) ||
+                           (activeLink(d) == LinkType::Gprs);
 
     IHttpClient* http = usar_gprs ? static_cast<IHttpClient*>(&d.http_gsm)
                                   : static_cast<IHttpClient*>(&d.http_wifi);
@@ -410,7 +413,11 @@ static void bindTransports(FirmwareUpdater::Impl& d) {
     if (http != d.http || mqtt != d.mqtt) {
         FWUP_LOGI("link", "transporte agora em %s", usar_gprs ? "gprs" : "wifi");
         // Nunca duas sessoes com a mesma credencial: o broker derruba uma delas.
-        if (d.mqtt != nullptr && d.mqtt != mqtt) d.mqtt->end();
+        if (d.mqtt != nullptr && d.mqtt != mqtt) {
+            d.mqtt->end();
+            // Zerar e o que faz o mqttStep abrir a sessao no transporte novo.
+            d.mqtt_started = false;
+        }
         d.http = http;
         d.mqtt = mqtt;
     }

@@ -11,6 +11,55 @@ constexpr uint32_t kAtProbeMs   = 1000;
 constexpr uint32_t kNetworkMs   = 60000;
 constexpr uint32_t kAttachMs    = 30000;
 constexpr uint32_t kBackoffMs[] = {2000, 5000, 15000, 30000};
+constexpr uint32_t kHealthMs    = 30000;
+
+#if defined(FWUP_GSM_TRACE_AT)
+// Espelha na Serial o que passa pela UART do modem, nos dois sentidos. So para
+// diagnostico: o volume e alto, e os pacotes MQTT aparecem crus no meio.
+class EspelhoAt : public Stream {
+public:
+    EspelhoAt(Stream& modem, Print& saida) : _modem(modem), _saida(saida) {}
+
+    int available() override { return _modem.available(); }
+    int peek() override { return _modem.peek(); }
+
+    int read() override {
+        const int c = _modem.read();
+        if (c >= 0) {
+            marcar(false);
+            _saida.write(static_cast<uint8_t>(c));
+        }
+        return c;
+    }
+
+    size_t write(uint8_t c) override {
+        marcar(true);
+        _saida.write(c);
+        return _modem.write(c);
+    }
+
+    size_t write(const uint8_t* buf, size_t n) override {
+        marcar(true);
+        _saida.write(buf, n);
+        return _modem.write(buf, n);
+    }
+
+    void flush() override { _modem.flush(); }
+
+private:
+    // Um marcador a cada troca de sentido basta para ler o dialogo.
+    void marcar(bool envio) {
+        const uint8_t sentido = envio ? 1 : 2;
+        if (_sentido == sentido) return;
+        _sentido = sentido;
+        _saida.print(envio ? "\n[AT>] " : "\n[AT<] ");
+    }
+
+    Stream& _modem;
+    Print&  _saida;
+    uint8_t _sentido = 0;
+};
+#endif
 }  // namespace
 
 bool GsmLink::begin(const GprsConfig& cfg) {
@@ -25,7 +74,13 @@ bool GsmLink::begin(const GprsConfig& cfg) {
     porta.begin(cfg.baud, SERIAL_8N1, cfg.pin_rx, cfg.pin_tx);
     _serial = &porta;
 
+#if defined(FWUP_GSM_TRACE_AT)
+    static EspelhoAt espelho(porta, Serial);
+    static TinyGsm modem(espelho);
+    FWUP_LOGW("gprs", "trafego AT espelhado na Serial (FWUP_GSM_TRACE_AT)");
+#else
     static TinyGsm modem(porta);
+#endif
     _modem = &modem;
 
     _http.init(_modem, cfg.mux_http);
@@ -68,7 +123,10 @@ void GsmLink::fail(const char* why, uint32_t now) {
     FWUP_LOGW("gprs", "%s; nova tentativa em %lu ms", why, (unsigned long)espera);
 
     // Derrubar o PDP com o MQTT de pe emitiria CIPSHUT e fecharia todos os mux.
-    if (_pause != nullptr) _pause(_gate_ctx);
+    if (_pause != nullptr) {
+        _pause(_gate_ctx);
+        _mqtt_paused_by_fail = true;
+    }
     _http_leased = false;
 
     _state    = State::Backoff;
@@ -96,8 +154,16 @@ void GsmLink::loop(uint32_t now) {
             break;
 
         case State::Init:
-            if (_cfg.sim_pin != nullptr && _modem->getSimStatus() != 3) {
-                _modem->simUnlock(_cfg.sim_pin);
+            // init() e quem manda o ATE0. Sem ele o SIM800L devolve o eco de cada
+            // comando antes da resposta, e o TinyGSM le o eco no lugar dela: o IP
+            // saia como "AT+CIFSR;E010.131..." e o socket do MQTT nao abria.
+            // restart() fica de fora de proposito: reinicia o modem e perde o baud.
+            if (!_modem->init(_cfg.sim_pin)) {
+                // Tambem desiste com o SIM ainda acordando. O eco e o que nao pode
+                // sobrar ligado, entao ele sai de qualquer jeito.
+                FWUP_LOGW("gprs", "init do modem incompleto; desligando o eco direto");
+                _modem->sendAT(GF("E0"));
+                _modem->waitResponse();
             }
             _state = State::Network;
             _since = now;
@@ -116,10 +182,19 @@ void GsmLink::loop(uint32_t now) {
 
         case State::Attaching:
             if (_modem->isGprsConnected()) {
-                _failures = 0;
-                _state    = State::Ready;
+                _failures       = 0;
+                _state          = State::Ready;
+                _last_health_ms = now;
                 FWUP_LOGI("gprs", "PDP ativo, IP %s",
                           _modem->getLocalIP().c_str());
+
+                // Quem pausou a sessao ao declarar a queda devolve ela aqui. O
+                // resume so existia no fim do HTTP, e um aparelho parado nao faz
+                // HTTP: uma unica queda deixava o MQTT suspenso ate reiniciar.
+                if (_mqtt_paused_by_fail) {
+                    _mqtt_paused_by_fail = false;
+                    if (_resume != nullptr) _resume(_gate_ctx);
+                }
                 return;
             }
             if (now - _since > kAttachMs) {
@@ -130,15 +205,23 @@ void GsmLink::loop(uint32_t now) {
             break;
 
         case State::Ready:
-            // Uma queda com o HTTP em curso e tratada por quem detem o lease.
-            if (!_http_leased && !_modem->isGprsConnected()) {
-                fail("PDP caiu", now);
-            }
+            // Checar o PDP custa um AT+CGATT? e um AT+CIFSR que espera ate 10 s.
+            // Feito a cada volta do loop, ocupava a UART sem parar, e cada CIFSR
+            // que estourava virava uma queda que nao existiu. Socket do MQTT
+            // aberto ja prova que o PDP esta de pe; uma queda com o HTTP em curso
+            // e tratada por quem detem o lease.
+            if (_http_leased || _mqtt.connected()) break;
+            if (now - _last_health_ms < kHealthMs) break;
+            _last_health_ms = now;
+
+            // millis(), e nao now: a checagem pode ter bloqueado por segundos.
+            if (!_modem->isGprsConnected()) fail("PDP caiu", millis());
             break;
 
         case State::Backoff:
             if (now < _next_try) return;
-            _state = State::Network;
+            // Volta pelo init: um modem que reiniciou volta com o eco ligado.
+            _state = State::Init;
             _since = now;
             break;
     }
