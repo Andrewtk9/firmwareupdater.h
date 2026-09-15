@@ -91,6 +91,9 @@ private:
     uint8_t  _failures   = 0;
     bool     _http_leased = false;
 
+    uint32_t _last_health_ms      = 0;
+    bool     _mqtt_paused_by_fail = false;
+
     Gate  _pause  = nullptr;
     Gate  _resume = nullptr;
     void* _gate_ctx = nullptr;
