@@ -80,6 +80,21 @@ private:
 
     MqttSessionConfig _cfg;
     bool _configurado = false;
+
+    // Copias proprias das strings da sessao. _cfg aponta para elas, nunca para
+    // o que chegou em begin(): ver o comentario em begin().
+    static constexpr size_t kHostMax      = 64;
+    static constexpr size_t kUsuarioMax   = 48;
+    static constexpr size_t kSenhaMax     = 64;
+    static constexpr size_t kClientIdMax  = 64;
+    static constexpr size_t kWillCargaMax = 128;
+
+    char _host[kHostMax]             = {};
+    char _usuario[kUsuarioMax]       = {};
+    char _senha[kSenhaMax]           = {};
+    char _client_id[kClientIdMax]    = {};
+    char _will_topico[kTopicoMax]    = {};
+    char _will_carga[kWillCargaMax]  = {};
     bool _suspenso    = false;
 
     // Assinaturas refeitas a cada reconexao: a sessao e limpa e o broker nao

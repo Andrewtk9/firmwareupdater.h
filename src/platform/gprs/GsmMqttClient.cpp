@@ -20,6 +20,17 @@ constexpr uint32_t kBackoffMs[] = {3000, 8000, 15000, 30000};
 // passa de 15 s e o cliente se desconecta sozinho achando que o broker sumiu.
 constexpr uint16_t kSocketTimeoutS = 30;
 
+// Copia src para dst. Recusa em vez de truncar: um host, usuario ou senha
+// cortado daria uma conexao recusada sem nenhuma pista do motivo.
+bool copiar(char* dst, size_t cap, const char* src) {
+    if (src == nullptr) {
+        dst[0] = '\0';
+        return true;
+    }
+    const int n = snprintf(dst, cap, "%s", src);
+    return n >= 0 && static_cast<size_t>(n) < cap;
+}
+
 }  // namespace
 
 GsmMqttClient::GsmMqttClient(GsmLink& link) : _link(link), _cliente() {
@@ -73,7 +84,37 @@ bool GsmMqttClient::begin(const MqttSessionConfig& cfg) {
         return false;
     }
 
-    _cfg         = cfg;
+    // As strings da sessao sao COPIADAS aqui, e nao apenas apontadas.
+    //
+    // Quem chama monta host, usuario e senha em buffers na propria pilha e
+    // retorna logo em seguida; o connect so acontece depois, no loop(). E o
+    // PubSubClient::setServer() guarda o ponteiro, nao o texto. Com a pilha ja
+    // reaproveitada, o modem recebia lixo no lugar do broker -
+    //     AT+CIPSTART=0,"TCP","??5?mode",1883
+    // - e usuario e senha iam corrompidos junto. A sessao nunca subia, entao
+    // nao saia ping nenhum, e nada disso aparecia como erro.
+    //
+    // O caminho WiFi nao sofre disso porque o esp-mqtt copia a configuracao
+    // dentro do esp_mqtt_client_init, ainda com a pilha de quem chamou viva.
+    if (!copiar(_host, sizeof(_host), cfg.host) ||
+        !copiar(_usuario, sizeof(_usuario), cfg.username) ||
+        !copiar(_senha, sizeof(_senha), cfg.password) ||
+        !copiar(_client_id, sizeof(_client_id), cfg.client_id) ||
+        !copiar(_will_topico, sizeof(_will_topico), cfg.will_topic) ||
+        !copiar(_will_carga, sizeof(_will_carga), cfg.will_payload)) {
+        FWUP_LOGE("mqtt", "host, usuario, senha, client id ou will maior que o buffer");
+        return false;
+    }
+
+    _cfg              = cfg;
+    _cfg.host         = _host;
+    _cfg.username     = (cfg.username != nullptr) ? _usuario : nullptr;
+    _cfg.password     = (cfg.password != nullptr) ? _senha : nullptr;
+    _cfg.client_id    = _client_id;
+    _cfg.will_topic   = (cfg.will_topic != nullptr) ? _will_topico : nullptr;
+    _cfg.will_payload = (cfg.will_payload != nullptr) ? _will_carga : nullptr;
+    _cfg.ca_pem       = nullptr;   // sem TLS no celular; nao guardar ponteiro alheio
+
     _configurado = true;
     _suspenso    = false;
 
@@ -81,7 +122,7 @@ bool GsmMqttClient::begin(const MqttSessionConfig& cfg) {
     if (socket == nullptr) return false;
 
     _cliente.setClient(*socket);
-    _cliente.setServer(cfg.host, cfg.port);
+    _cliente.setServer(_host, _cfg.port);
     _cliente.setCallback(aoReceber);
     _cliente.setKeepAlive(cfg.keepalive_s);
     _cliente.setSocketTimeout(kSocketTimeoutS);
@@ -97,7 +138,7 @@ bool GsmMqttClient::begin(const MqttSessionConfig& cfg) {
     _proxima_tentativa = 0;
     _falhas            = 0;
 
-    FWUP_LOGI("mqtt", "sessao GPRS configurada para %s:%u", cfg.host, cfg.port);
+    FWUP_LOGI("mqtt", "sessao GPRS configurada para %s:%u", _host, _cfg.port);
     return true;
 }
 
