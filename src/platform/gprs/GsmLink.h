@@ -51,6 +51,10 @@ public:
     void reportMqttTransportFailure(uint32_t now);
     void reportMqttConnected();
 
+    // A sessao estava de pe e caiu. Nos logs de campo o TCP nunca mais abriu em
+    // cima do mesmo PDP depois disso, entao o link refaz o PDP na hora.
+    void reportMqttSessionLost(uint32_t now);
+
     // A client bound to the HTTP mux. Only valid while the lease is held.
     TinyGsmClient* httpClient() { return _http_leased ? &_http : nullptr; }
 
@@ -86,7 +90,8 @@ private:
 
     void power(bool on);
     void fail(const char* why, uint32_t now);
-    void resetModem();
+    void resetModem(const char* motivo);
+    void derrubarPdp();
 
     GprsConfig _cfg;
     HardwareSerial* _serial = nullptr;
@@ -108,7 +113,13 @@ private:
     // Ver reportMqttTransportFailure().
     uint8_t _mqtt_falhas_seguidas = 0;
     uint8_t _resets_modem         = 0;
-    bool    _refazer_pdp          = false;  // proximo Attaching roda gprsConnect mesmo com PDP "de pe"
+    bool    _refazer_pdp          = false;  // proximo Attaching derruba o PDP e pede outro
+
+    // Recuperacao portada da v1 (ver GsmLink.cpp).
+    uint32_t _settle_ms    = 0;      // 0 = boot_settle_ms; depois de reset, curto
+    uint32_t _net_check_ms = 0;      // ultima consulta de CREG e sinal
+    uint32_t _ip_anterior  = 0;      // IP do ultimo PDP que ficou de pe
+    bool     _comparar_ip  = false;  // PDP refeito de proposito: o IP tem de mudar
 
     Gate  _pause  = nullptr;
     Gate  _resume = nullptr;

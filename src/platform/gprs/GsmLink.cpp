@@ -9,14 +9,26 @@ namespace campodata {
 namespace {
 constexpr uint32_t kAtProbeMs   = 1000;
 constexpr uint32_t kNetworkMs   = 60000;
-constexpr uint32_t kAttachMs    = 30000;
+constexpr uint32_t kAttachMs    = 25000;
 constexpr uint32_t kBackoffMs[] = {2000, 5000, 15000, 30000};
 constexpr uint32_t kHealthMs    = 30000;
 
-// Escada de recuperacao (ver reportMqttTransportFailure), contada em falhas
-// de transporte SEGUIDAS da sessao MQTT com o link declarado de pe.
-constexpr uint8_t kFalhasRefazerPdp = 2;
-constexpr uint8_t kFalhasResetModem = 4;
+// Recuperacao, portada da v1 e apertada no tempo: depois de uma queda o aparelho
+// nao pode ficar minutos fora do ar.
+//
+// Sem registro, CREG e sinal sao consultados a cada kNetCheckMs. CREG=3 reinicia
+// na hora; sinal bom sem registro por kNetSinalBomMs tambem (v1, Blocos 70 e 75).
+constexpr uint32_t kNetCheckMs    = 3000;
+constexpr uint32_t kNetSinalBomMs = 20000;
+
+// Depois de um reset por AT o modem responde em 2-3 s. O boot_settle_ms e para
+// o arranque frio, com a alimentacao acabando de subir.
+constexpr uint32_t kSettleResetMs = 3000;
+
+// Falhas de transporte seguidas da sessao MQTT: a primeira refaz o PDP, a
+// segunda reinicia o modem.
+constexpr uint8_t kFalhasRefazerPdp = 1;
+constexpr uint8_t kFalhasResetModem = 2;
 
 #if defined(FWUP_GSM_TRACE_AT)
 // Espelha na Serial o que passa pela UART do modem, nos dois sentidos. So para
@@ -145,9 +157,10 @@ void GsmLink::loop(uint32_t now) {
         case State::Off:
             break;
 
-        case State::Settling:
-            if (now - _since < _cfg.boot_settle_ms) return;
-            if (now - _since > _cfg.boot_settle_ms + 20000) {
+        case State::Settling: {
+            const uint32_t settle = (_settle_ms != 0) ? _settle_ms : _cfg.boot_settle_ms;
+            if (now - _since < settle) return;
+            if (now - _since > settle + 20000) {
                 fail("modem nao respondeu ao AT", now);
                 return;
             }
@@ -157,12 +170,14 @@ void GsmLink::loop(uint32_t now) {
                 _since = now;
             }
             break;
+        }
 
         case State::Init:
             // init() e quem manda o ATE0. Sem ele o SIM800L devolve o eco de cada
             // comando antes da resposta, e o TinyGSM le o eco no lugar dela: o IP
             // saia como "AT+CIFSR;E010.131..." e o socket do MQTT nao abria.
-            // restart() fica de fora de proposito: reinicia o modem e perde o baud.
+            // O restart() do TinyGSM segue de fora: dorme com delay() e chama
+            // init() por dentro. O reset da recuperacao e o resetModem().
             if (!_modem->init(_cfg.sim_pin)) {
                 // Tambem desiste com o SIM ainda acordando. O eco e o que nao pode
                 // sobrar ligado, entao ele sai de qualquer jeito.
@@ -170,31 +185,80 @@ void GsmLink::loop(uint32_t now) {
                 _modem->sendAT(GF("E0"));
                 _modem->waitResponse();
             }
-            _state = State::Network;
-            _since = now;
+            _state        = State::Network;
+            _since        = now;
+            _net_check_ms = now;
             FWUP_LOGI("gprs", "aguardando registro na rede");
             break;
 
-        case State::Network:
+        case State::Network: {
             if (_modem->isNetworkConnected()) {
                 FWUP_LOGI("gprs", "registrado, rssi %d dBm", (int)rssiDbm());
                 _state = State::Attaching;
                 _since = now;
                 return;
             }
-            if (now - _since > kNetworkMs) fail("sem registro na rede", now);
+            if (now - _net_check_ms < kNetCheckMs) break;
+            _net_check_ms = now;
+
+            const uint32_t decorrido = now - _since;
+            const int      creg      = static_cast<int>(_modem->getRegistrationStatus());
+            const int      csq       = _modem->getSignalQuality();
+            const bool     sinal_bom = (csq >= 15 && csq != 99);   // 99 = desconhecido
+
+            // v1, Bloco 70: registro NEGADO. O modem nao tenta de novo sozinho, e
+            // esperar a janela so gastava tempo.
+            if (creg == 3) {
+                resetModem("registro negado pela operadora (CREG=3)");
+                return;
+            }
+            // v1, Bloco 75: com sinal a rede esta ali; sem registro, quem travou
+            // foi o modem. Em campo ele ficou 5 min assim, com sinal 29/31.
+            if (sinal_bom && decorrido >= kNetSinalBomMs) {
+                FWUP_LOGW("gprs", "sinal %d/31 e sem registro ha %lu s", csq,
+                          (unsigned long)(decorrido / 1000));
+                resetModem("modem preso com sinal bom");
+                return;
+            }
+            if (decorrido > kNetworkMs) {
+                resetModem("sem registro na rede");
+                return;
+            }
             break;
+        }
 
         case State::Attaching:
-            // _refazer_pdp: a sessao MQTT nao conseguiu abrir socket com o PDP
-            // aparentemente de pe. CGATT=1 e IP presente nao provam que a pilha
-            // TCP do modem funciona, entao o PDP e refeito de qualquer jeito.
-            if (!_refazer_pdp && _modem->isGprsConnected()) {
+            // O PDP caiu, ou a sessao MQTT nao abre em cima dele. O modem costuma
+            // se reanexar sozinho, e CGATT=1 com IP presente nao prova nada: sem
+            // derrubar tudo, o PDP "voltava" sempre com o mesmo IP e o TCP seguia
+            // sem abrir, ate alguem desligar a placa.
+            if (_refazer_pdp) {
+                _refazer_pdp = false;
+                _comparar_ip = true;
+                derrubarPdp();
+                _modem->gprsConnect(_cfg.apn, _cfg.user, _cfg.pass);
+                _since = millis();   // o prazo do PDP comeca depois da derrubada
+                break;
+            }
+            if (_modem->isGprsConnected()) {
+                const IPAddress ip     = _modem->localIP();
+                const uint32_t  ip_num = static_cast<uint32_t>(ip);
+
+                // Refeito de proposito e voltou igual: o contexto nao foi desfeito.
+                // Depois de um reset de verdade nao se compara, porque a operadora
+                // pode repetir o endereco e isso viraria um loop de resets.
+                if (_comparar_ip && ip_num != 0 && ip_num == _ip_anterior) {
+                    _comparar_ip = false;
+                    FWUP_LOGW("gprs", "PDP refeito voltou com o mesmo IP %s", ip.toString().c_str());
+                    resetModem("PDP refeito voltou com o mesmo IP");
+                    return;
+                }
+                _comparar_ip    = false;
+                _ip_anterior    = ip_num;
                 _failures       = 0;
                 _state          = State::Ready;
                 _last_health_ms = now;
-                FWUP_LOGI("gprs", "PDP ativo, IP %s",
-                          _modem->getLocalIP().c_str());
+                FWUP_LOGI("gprs", "PDP ativo, IP %s", ip.toString().c_str());
 
                 // Quem pausou a sessao ao declarar a queda devolve ela aqui. O
                 // resume so existia no fim do HTTP, e um aparelho parado nao faz
@@ -206,12 +270,9 @@ void GsmLink::loop(uint32_t now) {
                 return;
             }
             if (now - _since > kAttachMs) {
-                fail("PDP nao subiu", now);
+                resetModem("PDP nao subiu");
                 return;
             }
-            // gprsConnect comeca com CIPSHUT, que fecha todos os mux. So se chega
-            // aqui com o MQTT pausado, por fail() ou resetModem().
-            _refazer_pdp = false;
             _modem->gprsConnect(_cfg.apn, _cfg.user, _cfg.pass);
             break;
 
@@ -226,7 +287,10 @@ void GsmLink::loop(uint32_t now) {
             _last_health_ms = now;
 
             // millis(), e nao now: a checagem pode ter bloqueado por segundos.
-            if (!_modem->isGprsConnected()) fail("PDP caiu", millis());
+            if (!_modem->isGprsConnected()) {
+                _refazer_pdp = true;
+                fail("PDP caiu", millis());
+            }
             break;
 
         case State::Backoff:
@@ -264,14 +328,22 @@ void GsmLink::reportMqttTransportFailure(uint32_t now) {
     if (_mqtt_falhas_seguidas < 255) _mqtt_falhas_seguidas++;
 
     if (_mqtt_falhas_seguidas >= kFalhasResetModem) {
-        _mqtt_falhas_seguidas = 0;
-        resetModem();
+        resetModem("MQTT segue sem abrir depois de refazer o PDP");
         return;
     }
-    if (_mqtt_falhas_seguidas == kFalhasRefazerPdp) {
+    if (_mqtt_falhas_seguidas >= kFalhasRefazerPdp) {
         _refazer_pdp = true;
         fail("MQTT nao abre com o PDP de pe; refazendo o PDP", now);
     }
+}
+
+void GsmLink::reportMqttSessionLost(uint32_t now) {
+    if (_state != State::Ready || _http_leased) return;
+    // Conta como a primeira falha da escada: se o PDP novo tambem nao servir, a
+    // proxima falha ja reinicia o modem.
+    if (_mqtt_falhas_seguidas < kFalhasRefazerPdp) _mqtt_falhas_seguidas = kFalhasRefazerPdp;
+    _refazer_pdp = true;
+    fail("sessao MQTT caiu; refazendo o PDP", now);
 }
 
 void GsmLink::reportMqttConnected() {
@@ -279,40 +351,63 @@ void GsmLink::reportMqttConnected() {
     _resets_modem         = 0;
 }
 
-void GsmLink::resetModem() {
+void GsmLink::derrubarPdp() {
+    // O gprsDisconnect do TinyGSM manda so CIPSHUT e CGATT=0, mas o gprsConnect
+    // tambem abre o bearer do SAPBR e ativa o contexto com CGACT. Aqui tudo e
+    // desfeito antes de pedir outro PDP. ERROR e esperado no que ja estava
+    // fechado: a resposta so e drenada.
+    FWUP_LOGI("gprs", "derrubando o PDP por inteiro");
+    _modem->sendAT(GF("+SAPBR=0,1"));
+    _modem->waitResponse(10000L);
+    _modem->sendAT(GF("+CIPSHUT"));
+    _modem->waitResponse(20000L, GF("SHUT OK"));
+    _modem->sendAT(GF("+CGACT=0,1"));
+    _modem->waitResponse(20000L);
+    _modem->sendAT(GF("+CGATT=0"));
+    _modem->waitResponse(20000L);
+}
+
+void GsmLink::resetModem(const char* motivo) {
     // O que a v1 fazia e esta camada tinha deixado de fora. Sem reset, uma pilha
-    // IP travada no SIM800L nunca volta: o PDP "sobe" com o mesmo IP, o
-    // CIPSTART nao abre e o aparelho so reconecta desligando a placa. Visto em
-    // campo: 55 minutos em estado -2 ate reiniciar.
+    // IP travada no SIM800L nunca volta: o PDP "sobe" com o mesmo IP, o CIPSTART
+    // nao abre e o aparelho so reconecta desligando a placa. Visto em campo: 55
+    // minutos em estado -2 ate reiniciar.
     //
     // Nao e o restart() do TinyGSM, que dorme com delay() e chama init() por
-    // dentro. O comando sai daqui e o Settling espera o modem voltar e refaz
-    // tudo, inclusive o ATE0 e os AT+CIP*, que nao sobrevivem ao reset. O
-    // SIM800L sai de fabrica em autobaud: o primeiro AT do Settling ressincroniza.
+    // dentro. O comando sai daqui e o Settling espera o modem voltar e refaz tudo,
+    // inclusive o ATE0 e os AT+CIP*, que nao sobrevivem ao reset. O SIM800L sai de
+    // fabrica em autobaud: o primeiro AT do Settling ressincroniza.
     if (_pause != nullptr) {
         _pause(_gate_ctx);
         _mqtt_paused_by_fail = true;
     }
-    _http_leased = false;
-    _refazer_pdp = true;
+    _http_leased          = false;
+    _mqtt_falhas_seguidas = 0;
+    // Modem recem-reiniciado nao tem PDP velho para derrubar, e depois de reset a
+    // operadora pode repetir o IP sem que isso signifique nada.
+    _refazer_pdp = false;
+    _comparar_ip = false;
 
     if ((_resets_modem & 1) == 0) {
-        FWUP_LOGW("gprs", "MQTT segue sem abrir; reiniciando o modem (AT+CFUN=1,1)");
+        FWUP_LOGW("gprs", "%s; reiniciando o modem (AT+CFUN=1,1)", motivo);
         _modem->sendAT(GF("+CFUN=1,1"));
         _modem->waitResponse(10000L);
     } else {
         // Alternado com o reset completo, como na v1: as vezes o radio so sai do
         // estado preso com CFUN=0/1, e nao com CFUN=1,1.
-        FWUP_LOGW("gprs", "reinicio anterior nao resolveu; desligando e religando o radio (CFUN=0/1)");
+        FWUP_LOGW("gprs", "%s; o reinicio anterior nao resolveu, desligando e religando o radio (CFUN=0/1)", motivo);
         _modem->sendAT(GF("+CFUN=0"));
         _modem->waitResponse(10000L);
         _modem->sendAT(GF("+CFUN=1"));
         _modem->waitResponse(10000L);
+        _modem->sendAT(GF("+COPS=0"));   // registro automatico, como na v1
+        _modem->waitResponse(10000L);
     }
     if (_resets_modem < 255) _resets_modem++;
 
-    _state = State::Settling;
-    _since = millis();   // os waitResponse acima podem ter levado segundos
+    _settle_ms = kSettleResetMs;
+    _state     = State::Settling;
+    _since     = millis();   // os waitResponse acima podem ter levado segundos
 }
 
 namespace {

@@ -22,8 +22,9 @@ constexpr uint16_t kSocketTimeoutS = 30;
 
 // Prazo para abrir o TCP do broker. Deixado ao PubSubClient, o connect(host,
 // port) do TinyGSM usa 75 s, e cada tentativa que falha congela a task inteira
-// esse tempo - com o modem preso, cada volta da recuperacao levava minutos.
-constexpr int kConnectTimeoutS = 20;
+// esse tempo. Com rede boa o CIPSTART fecha em 1-3 s; 12 s ja e folga, e cada
+// segundo aqui e um segundo a mais fora do ar antes de escalar.
+constexpr int kConnectTimeoutS = 12;
 
 // Copia src para dst. Recusa em vez de truncar: um host, usuario ou senha
 // cortado daria uma conexao recusada sem nenhuma pista do motivo.
@@ -149,6 +150,7 @@ bool GsmMqttClient::begin(const MqttSessionConfig& cfg) {
 
 void GsmMqttClient::end() {
     if (_cliente.connected()) _cliente.disconnect();
+    _estava_conectado = false;   // desligamento pedido, nao queda
     _configurado = false;
     if (g_instancia == this) g_instancia = nullptr;
 }
@@ -199,6 +201,7 @@ bool GsmMqttClient::conectar() {
     }
 
     _link.reportMqttConnected();
+    _estava_conectado = true;
     FWUP_LOGI("mqtt", "conectado a %s:%u", _cfg.host, _cfg.port);
 
     // Sessao limpa: o broker nao guarda assinatura nenhuma entre conexoes.
@@ -217,6 +220,15 @@ void GsmMqttClient::loop(uint32_t now) {
     if (_cliente.connected()) {
         _cliente.loop();     // fora de qualquer condicao: e o keepalive
         _falhas = 0;
+        _estava_conectado = true;
+        return;
+    }
+
+    if (_estava_conectado) {
+        // Caiu com a sessao de pe: publish que falhou, keepalive, CLOSED do modem.
+        _estava_conectado = false;
+        FWUP_LOGW("mqtt", "sessao caiu (estado %d)", _cliente.state());
+        _link.reportMqttSessionLost(now);
         return;
     }
 
@@ -235,6 +247,7 @@ void GsmMqttClient::loop(uint32_t now) {
 void GsmMqttClient::suspend() {
     if (_suspenso) return;
     _suspenso = true;
+    _estava_conectado = false;   // HTTP pediu o link: desconexao de proposito
     if (_cliente.connected()) _cliente.disconnect();
     FWUP_LOGD("mqtt", "sessao suspensa: o link foi para o HTTP");
 }

@@ -115,6 +115,10 @@ private:
 
     uint32_t _proxima_tentativa = 0;
     uint8_t  _falhas = 0;
+
+    // Separa "a sessao caiu" de "nao conseguiu abrir": a queda manda o link
+    // refazer o PDP na hora, sem tentar TCP em cima do contexto velho.
+    bool _estava_conectado = false;
 };
 
 }  // namespace campodata
