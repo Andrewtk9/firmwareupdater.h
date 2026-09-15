@@ -383,6 +383,19 @@ static bool linkUp(FirmwareUpdater::Impl& d) {
     return activeLink(d) != LinkType::None;
 }
 
+// Nome so vira IP pelo DNS do lwIP quando o trafego sai pelo WiFi. No GPRS quem
+// resolve e o proprio modem, dentro do AT+CIPSTART, e a pilha do ESP nunca
+// recebe servidor DNS: exigir um ali trava o celular antes do primeiro pacote.
+static bool nameResolutionReady(FirmwareUpdater::Impl& d) {
+    return activeLink(d) != LinkType::Wifi || dnsReady();
+}
+
+// O retrato da rede so existe no WiFi. No GPRS ele diria "wifi desconectado",
+// que e verdade e nao explica nada.
+static void logActiveNetwork(FirmwareUpdater::Impl& d) {
+    if (activeLink(d) == LinkType::Wifi) logNetwork();
+}
+
 // Aponta HTTP e MQTT para a implementacao do link ativo. Chamado a cada passada:
 // no modo Both o link muda sozinho quando o WiFi vai e volta.
 static void bindTransports(FirmwareUpdater::Impl& d) {
@@ -448,7 +461,7 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     // Sem DNS a requisicao nao tem como chegar a lugar nenhum, entao nem sai.
     // O aviso sai uma vez por queda, e nao a cada volta do loop.
-    if (!dnsReady()) {
+    if (!nameResolutionReady(d)) {
         if (!d.warned_no_dns) {
             d.warned_no_dns = true;
             FWUP_LOGE("prov", "adiado: rede sem DNS, o nome do servidor nao "
@@ -493,7 +506,7 @@ static void provisionStep(FirmwareUpdater::Impl& d, uint32_t now) {
         d.transport_backoff.fail(now);
         FWUP_LOGE("prov", "nao alcancou o servidor (%s), nova tentativa em %u ms",
                   toString(herr), d.transport_backoff.currentDelayMs());
-        logNetwork();
+        logActiveNetwork(d);
         return;
     }
     d.transport_backoff.reset();
@@ -577,7 +590,7 @@ static void mqttStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
     // O broker tambem e alcancado por nome: sem DNS a sessao nao teria como
     // subir, e esp-mqtt ficaria reciclando socket sozinho na propria task.
-    if (!dnsReady()) return;
+    if (!nameResolutionReady(d)) return;
 
     if (d.mqtt_started || !d.mqtt_backoff.ready(now)) return;
 
