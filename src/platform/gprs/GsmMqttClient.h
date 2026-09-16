@@ -119,6 +119,9 @@ private:
     // Separa "a sessao caiu" de "nao conseguiu abrir": a queda manda o link
     // refazer o PDP na hora, sem tentar TCP em cima do contexto velho.
     bool _estava_conectado = false;
+
+    // PDP em que a ultima tentativa de TCP foi feita (ver GsmLink::pdpSeq).
+    uint32_t _pdp_da_tentativa = 0;
 };
 
 }  // namespace campodata

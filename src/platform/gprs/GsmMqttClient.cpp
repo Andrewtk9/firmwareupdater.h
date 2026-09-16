@@ -26,6 +26,12 @@ constexpr uint16_t kSocketTimeoutS = 30;
 // segundo aqui e um segundo a mais fora do ar antes de escalar.
 constexpr int kConnectTimeoutS = 12;
 
+// Primeira tentativa em cima de um PDP novo: nela cabe a resolucao de nome, que
+// em 2G e lenta, e cortar cedo demais faz a escada girar por engano. A v1 usava
+// os 75 s do TinyGSM em toda tentativa; aqui o prazo largo vale so uma vez por
+// PDP, e as seguintes continuam curtas.
+constexpr int kConnectTimeoutNovoS = 45;
+
 // Copia src para dst. Recusa em vez de truncar: um host, usuario ou senha
 // cortado daria uma conexao recusada sem nenhuma pista do motivo.
 bool copiar(char* dst, size_t cap, const char* src) {
@@ -177,10 +183,21 @@ bool GsmMqttClient::conectar() {
     // quando o socket ja esta aberto.
     TinyGsmClient* socket = _link.mqttClient();
     if (socket == nullptr) return false;
-    if (!socket->connected() && !socket->connect(_host, _cfg.port, kConnectTimeoutS)) {
-        FWUP_LOGW("mqtt", "TCP com %s:%u nao abriu em %d s", _host, _cfg.port, kConnectTimeoutS);
-        _link.reportMqttTransportFailure(millis());
-        return false;
+
+    const uint32_t pdp = _link.pdpSeq();
+    const bool     pdp_novo = (pdp != _pdp_da_tentativa);
+    _pdp_da_tentativa = pdp;
+    const int prazo = pdp_novo ? kConnectTimeoutNovoS : kConnectTimeoutS;
+
+    if (!socket->connected()) {
+        // Fecha o que tiver sobrado do socket anterior com prazo curto. O stop()
+        // padrao do TinyGSM espera ate 15 s drenando o buffer.
+        socket->stop(1500);
+        if (!socket->connect(_host, _cfg.port, prazo)) {
+            FWUP_LOGW("mqtt", "TCP com %s:%u nao abriu em %d s", _host, _cfg.port, prazo);
+            _link.reportMqttTransportFailure(millis());
+            return false;
+        }
     }
 
     const bool ok = (_cfg.will_topic != nullptr)

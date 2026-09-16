@@ -255,6 +255,7 @@ void GsmLink::loop(uint32_t now) {
                 }
                 _comparar_ip    = false;
                 _ip_anterior    = ip_num;
+                _pdp_seq++;
                 _failures       = 0;
                 _state          = State::Ready;
                 _last_health_ms = now;
@@ -351,7 +352,18 @@ void GsmLink::reportMqttConnected() {
     _resets_modem         = 0;
 }
 
+void GsmLink::drenarUart() {
+    if (_serial == nullptr) return;
+    size_t sobra = 0;
+    while (_serial->available() && sobra < 2048) {
+        _serial->read();
+        sobra++;
+    }
+    if (sobra > 0) FWUP_LOGI("gprs", "%u bytes velhos descartados da UART", (unsigned)sobra);
+}
+
 void GsmLink::derrubarPdp() {
+    drenarUart();
     // O gprsDisconnect do TinyGSM manda so CIPSHUT e CGATT=0, mas o gprsConnect
     // tambem abre o bearer do SAPBR e ativa o contexto com CGACT. Aqui tudo e
     // desfeito antes de pedir outro PDP. ERROR e esperado no que ja estava
@@ -404,6 +416,10 @@ void GsmLink::resetModem(const char* motivo) {
         _modem->waitResponse(10000L);
     }
     if (_resets_modem < 255) _resets_modem++;
+
+    // O modem reiniciado despeja RDY, +CFUN, +CPIN e afins. Lido como resposta
+    // de comando, isso desloca todo o dialogo seguinte.
+    drenarUart();
 
     _settle_ms = kSettleResetMs;
     _state     = State::Settling;

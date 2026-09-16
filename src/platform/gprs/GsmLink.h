@@ -55,6 +55,11 @@ public:
     // cima do mesmo PDP depois disso, entao o link refaz o PDP na hora.
     void reportMqttSessionLost(uint32_t now);
 
+    // Muda a cada PDP que sobe. A sessao usa isso para saber se e a primeira
+    // tentativa em cima deste contexto - a primeira merece um prazo maior,
+    // porque nela cabe a resolucao de nome, que em 2G e lenta.
+    uint32_t pdpSeq() const { return _pdp_seq; }
+
     // A client bound to the HTTP mux. Only valid while the lease is held.
     TinyGsmClient* httpClient() { return _http_leased ? &_http : nullptr; }
 
@@ -93,6 +98,13 @@ private:
     void resetModem(const char* motivo);
     void derrubarPdp();
 
+    // Le e joga fora o que sobrou na UART. Resposta atrasada, URC desconhecido
+    // ou aviso de boot do modem ficam no buffer e deslocam a leitura seguinte:
+    // o TinyGSM passa a ler a resposta do comando anterior. Isso nao se
+    // conserta sozinho, sobrevive ao reset do modem, e era o que obrigava a
+    // reiniciar a placa.
+    void drenarUart();
+
     GprsConfig _cfg;
     HardwareSerial* _serial = nullptr;
     TinyGsm*        _modem  = nullptr;
@@ -119,6 +131,7 @@ private:
     uint32_t _settle_ms    = 0;      // 0 = boot_settle_ms; depois de reset, curto
     uint32_t _net_check_ms = 0;      // ultima consulta de CREG e sinal
     uint32_t _ip_anterior  = 0;      // IP do ultimo PDP que ficou de pe
+    uint32_t _pdp_seq      = 0;      // incrementa a cada PDP que sobe
     bool     _comparar_ip  = false;  // PDP refeito de proposito: o IP tem de mudar
 
     Gate  _pause  = nullptr;
