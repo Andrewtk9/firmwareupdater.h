@@ -390,14 +390,21 @@ void GsmLink::derrubarPdp() {
     // desfeito antes de pedir outro PDP. ERROR e esperado no que ja estava
     // fechado: a resposta so e drenada.
     FWUP_LOGI("gprs", "derrubando o PDP por inteiro");
+    // Prazos medidos pelo que cada comando realmente leva num SIM800L que
+    // responde: o bearer e o contexto fecham em menos de um segundo, e o
+    // CIPSHUT e o unico que as vezes demora. Os tetos anteriores (10 s + 20 s +
+    // 20 s + 20 s) so apareciam quando o modem nao respondia - que e
+    // exatamente o caso que trouxe o codigo ate aqui - e somavam ate 70 s a
+    // uma recuperacao. Quem trata o modem mudo e o resetModem, mais adiante na
+    // escada, e nao a espera aqui.
     _modem->sendAT(GF("+SAPBR=0,1"));
-    _modem->waitResponse(10000L);
+    _modem->waitResponse(3000L);
     _modem->sendAT(GF("+CIPSHUT"));
-    _modem->waitResponse(20000L, GF("SHUT OK"));
+    _modem->waitResponse(10000L, GF("SHUT OK"));
     _modem->sendAT(GF("+CGACT=0,1"));
-    _modem->waitResponse(20000L);
+    _modem->waitResponse(5000L);
     _modem->sendAT(GF("+CGATT=0"));
-    _modem->waitResponse(20000L);
+    _modem->waitResponse(10000L);
 }
 
 void GsmLink::resetModem(const char* motivo) {

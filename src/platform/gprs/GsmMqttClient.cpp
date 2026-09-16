@@ -249,9 +249,9 @@ void GsmMqttClient::loop(uint32_t now) {
         // ele possa ter parado na queda anterior.
         _estava_conectado  = false;
         _falhas            = 0;
-        _proxima_tentativa = now + kBackoffMs[0];
-        FWUP_LOGW("mqtt", "sessao caiu (estado %d); nova tentativa em %lu ms",
-                  _cliente.state(), (unsigned long)kBackoffMs[0]);
+        _proxima_tentativa = now;   // a v1 retentava na hora; o backoff so vale entre tentativas
+        FWUP_LOGW("mqtt", "sessao caiu (estado %d); reconectando agora",
+                  _cliente.state());
         _link.reportMqttSessionLost(now);
         return;
     }
