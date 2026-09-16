@@ -242,12 +242,26 @@ void GsmMqttClient::loop(uint32_t now) {
     }
 
     if (_estava_conectado) {
-        // Caiu com a sessao de pe: publish que falhou, keepalive, CLOSED do modem.
-        _estava_conectado = false;
-        FWUP_LOGW("mqtt", "sessao caiu (estado %d)", _cliente.state());
+        // Caiu com a sessao de pe: publish que falhou, keepalive, CLOSED do
+        // modem. Como na v1, a primeira providencia e reabrir o socket no mesmo
+        // PDP - a escada do link so entra se isso nao der certo. O backoff volta
+        // ao inicio para que a retentativa saia em 3 s, e nao nos 30 s em que
+        // ele possa ter parado na queda anterior.
+        _estava_conectado  = false;
+        _falhas            = 0;
+        _proxima_tentativa = now + kBackoffMs[0];
+        FWUP_LOGW("mqtt", "sessao caiu (estado %d); nova tentativa em %lu ms",
+                  _cliente.state(), (unsigned long)kBackoffMs[0]);
         _link.reportMqttSessionLost(now);
         return;
     }
+
+    // Link fora do ar ou emprestado ao HTTP: nao ha o que tentar, e isto nao e
+    // falha da sessao. Contar aqui inflava o backoff ate 30 s justamente
+    // enquanto o link refazia o PDP ou reiniciava o modem, somando meio minuto
+    // a cada recuperacao - e ainda alimentava a escada com falhas que nao
+    // diziam nada sobre o modem.
+    if (!_link.up() || _link.httpBusy()) return;
 
     if (now < _proxima_tentativa) return;
 

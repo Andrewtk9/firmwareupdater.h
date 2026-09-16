@@ -25,10 +25,19 @@ constexpr uint32_t kNetSinalBomMs = 20000;
 // o arranque frio, com a alimentacao acabando de subir.
 constexpr uint32_t kSettleResetMs = 3000;
 
-// Falhas de transporte seguidas da sessao MQTT: a primeira refaz o PDP, a
-// segunda reinicia o modem.
-constexpr uint8_t kFalhasRefazerPdp = 1;
-constexpr uint8_t kFalhasResetModem = 2;
+// Falhas de transporte SEGUIDAS da sessao MQTT, contadas por quem tenta abrir o
+// socket. Os numeros sao os da v1, que voltava do ar e esta camada nao:
+//
+//   ate 3 falhas -> tenta de novo no MESMO PDP (backoff de 3 s, 8 s, 15 s)
+//   na 3a        -> refaz o PDP (CIPSHUT, reattach, IP novo)
+//   na 5a        -> reinicia o modem (CFUN=1,1, alternando com CFUN=0/1)
+//
+// Refazer o PDP na primeira falha, como estava aqui, cobra CIPSHUT + reattach +
+// DNS por qualquer queda - inclusive a que o broker provoca fechando a conexao -
+// e leva o aparelho a reiniciar o modem na tentativa seguinte. Cada volta dessas
+// custa minutos, e enquanto a causa da queda persistir a placa nao estabiliza.
+constexpr uint8_t kFalhasRefazerPdp = 3;
+constexpr uint8_t kFalhasResetModem = 5;
 
 #if defined(FWUP_GSM_TRACE_AT)
 // Espelha na Serial o que passa pela UART do modem, nos dois sentidos. So para
@@ -339,12 +348,24 @@ void GsmLink::reportMqttTransportFailure(uint32_t now) {
 }
 
 void GsmLink::reportMqttSessionLost(uint32_t now) {
+    (void)now;
     if (_state != State::Ready || _http_leased) return;
-    // Conta como a primeira falha da escada: se o PDP novo tambem nao servir, a
-    // proxima falha ja reinicia o modem.
-    if (_mqtt_falhas_seguidas < kFalhasRefazerPdp) _mqtt_falhas_seguidas = kFalhasRefazerPdp;
-    _refazer_pdp = true;
-    fail("sessao MQTT caiu; refazendo o PDP", now);
+
+    // A v1 nao encostava no PDP quando a sessao caia. Ela voltava ao estado de
+    // conectar MQTT e reabria o socket no mesmo contexto, ate tres vezes, com
+    // 3 s, 8 s e 15 s entre as tentativas; so entao derrubava o PDP.
+    //
+    // Esta camada fazia o contrario: derrubava o PDP na hora e ainda deixava a
+    // escada carregada, de modo que a tentativa seguinte reiniciava o modem.
+    // Com o broker fechando a conexao por conta propria - o REMOTE CLOSING que
+    // aparece no trace AT -, cada queda de segundos virava CIPSHUT, reattach,
+    // reset de modem e nova espera de registro. Minutos fora do ar por vez, e
+    // nenhuma estabilizacao enquanto a causa da queda continuasse ali.
+    //
+    // Agora a queda so e anotada. Quem escala e reportMqttTransportFailure(),
+    // chamada quando o socket realmente nao abre - que e o sinal de que o
+    // problema esta no PDP ou no modem, e nao do outro lado da conexao.
+    FWUP_LOGI("gprs", "sessao MQTT caiu; reconectando no mesmo PDP");
 }
 
 void GsmLink::reportMqttConnected() {
