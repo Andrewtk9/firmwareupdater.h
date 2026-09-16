@@ -287,20 +287,23 @@ void GsmLink::loop(uint32_t now) {
             break;
 
         case State::Ready:
-            // Checar o PDP custa um AT+CGATT? e um AT+CIFSR que espera ate 10 s.
-            // Feito a cada volta do loop, ocupava a UART sem parar, e cada CIFSR
-            // que estourava virava uma queda que nao existiu. Socket do MQTT
-            // aberto ja prova que o PDP esta de pe; uma queda com o HTTP em curso
-            // e tratada por quem detem o lease.
-            if (_http_leased || _mqtt.connected()) break;
-            if (now - _last_health_ms < kHealthMs) break;
-            _last_health_ms = now;
-
-            // millis(), e nao now: a checagem pode ter bloqueado por segundos.
-            if (!_modem->isGprsConnected()) {
-                _refazer_pdp = true;
-                fail("PDP caiu", millis());
-            }
+            // Sem checagem periodica de PDP aqui, pela mesma razao que levou a v1
+            // a tirar a dela (Bloco 60 v1.6.15): isGprsConnected() manda
+            // AT+CGATT? e AT+CIFSR, e o CIFSR espera ate 10 s. Um CIFSR que
+            // estoura devolve 0.0.0.0, que era lido como "PDP caiu" - e um PDP
+            // que estava de pe acabava derrubado por causa de uma resposta
+            // atrasada. Na v1 esse mesmo trafego na UART ainda disputava com o
+            // keepalive e fazia o broker dropar por PINGRESP perdido.
+            //
+            // E ele marcava _refazer_pdp por fora da escada: a politica portada
+            // da v1 diz que as tres primeiras falhas nao encostam no PDP, mas
+            // este caminho o refazia 30 s depois da queda de qualquer jeito, e a
+            // escada nunca chegava a valer.
+            //
+            // Quem descobre que o PDP nao serve mais e quem tenta abrir o
+            // socket: nenhum CIPSTART fecha, reportMqttTransportFailure conta, e
+            // a escada refaz o PDP na terceira falha e reinicia o modem na
+            // quinta. E o unico sinal que nao mente.
             break;
 
         case State::Backoff:
