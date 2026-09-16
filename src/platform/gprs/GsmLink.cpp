@@ -44,6 +44,10 @@ constexpr uint8_t kFalhasResetModem = 5;
 // diagnostico: o volume e alto, e os pacotes MQTT aparecem crus no meio.
 class EspelhoAt : public Stream {
 public:
+    // Print&, e nao HardwareSerial&: com ARDUINO_USB_CDC_ON_BOOT a Serial deste
+    // ESP32-S3 e um HWCDC, que nao deriva de HardwareSerial. O que importa aqui
+    // e availableForWrite(), virtual em Print desde o core ESP32 e implementada
+    // tanto pelo HWCDC quanto pela HardwareSerial.
     EspelhoAt(Stream& modem, Print& saida) : _modem(modem), _saida(saida) {}
 
     int available() override { return _modem.available(); }
@@ -52,38 +56,74 @@ public:
     int read() override {
         const int c = _modem.read();
         if (c >= 0) {
-            marcar(false);
-            _saida.write(static_cast<uint8_t>(c));
+            const uint8_t b = static_cast<uint8_t>(c);
+            espelhar(false, &b, 1);
         }
         return c;
     }
 
     size_t write(uint8_t c) override {
-        marcar(true);
-        _saida.write(c);
+        espelhar(true, &c, 1);
         return _modem.write(c);
     }
 
     size_t write(const uint8_t* buf, size_t n) override {
-        marcar(true);
-        _saida.write(buf, n);
+        espelhar(true, buf, n);
         return _modem.write(buf, n);
     }
 
     void flush() override { _modem.flush(); }
 
 private:
-    // Um marcador a cada troca de sentido basta para ler o dialogo.
-    void marcar(bool envio) {
+    // O espelho nunca pode segurar a leitura do modem.
+    //
+    // Serial.write() BLOQUEIA quando o buffer de transmissao enche, e a 115200
+    // cada byte custa 87 us. Espelhando byte a byte, toda resposta do modem
+    // passava a custar esse tempo de novo - e muito mais, porque as outras
+    // tasks imprimem na mesma Serial. Em campo isso apareceu como um
+    // DATA ACCEPT de 135 bytes levando 12 s, texto truncado no proprio log e,
+    // o pior, a sessao MQTT caindo com o socket ainda em CIPSTATUS CONNECTED:
+    // o PubSubClient estourava o prazo de leitura porque os bytes nao chegavam
+    // a tempo, e nao porque a rede tivesse caido.
+    //
+    // Um instrumento que altera o que mede nao serve para diagnosticar. Agora
+    // o espelho escreve apenas o que cabe no buffer de saida e conta o resto
+    // como perdido: log furado e melhor que defeito inventado.
+    void espelhar(bool envio, const uint8_t* buf, size_t n) {
         const uint8_t sentido = envio ? 1 : 2;
-        if (_sentido == sentido) return;
-        _sentido = sentido;
-        _saida.print(envio ? "\n[AT>] " : "\n[AT<] ");
+        const size_t  marca   = (_sentido == sentido) ? 0 : kMarcador;
+
+        const int livre = _saida.availableForWrite();
+        if (livre < 0 || static_cast<size_t>(livre) < n + marca) {
+            _perdidos += n;
+            avisar();
+            return;
+        }
+
+        if (marca != 0) {
+            _sentido = sentido;
+            _saida.print(envio ? "\n[AT>] " : "\n[AT<] ");
+        }
+        _saida.write(buf, n);
     }
 
-    Stream& _modem;
-    Print&  _saida;
-    uint8_t _sentido = 0;
+    // Quem le o log precisa saber que ele esta furado, ou vai procurar defeito
+    // em resposta truncada que o modem mandou inteira.
+    void avisar() {
+        if (_perdidos - _ultimo_aviso < 16384) return;
+        _ultimo_aviso = _perdidos;
+        FWUP_LOGW("gprs", "espelho AT: %lu bytes nao couberam na Serial e foram descartados",
+                  (unsigned long)_perdidos);
+    }
+
+    // "\n[AT>] " e "\n[AT<] " tem 7 caracteres.
+    static constexpr size_t kMarcador = 7;
+
+    Stream&         _modem;
+    Print&          _saida;
+    uint8_t         _sentido      = 0;
+    uint32_t        _perdidos     = 0;
+    uint32_t        _ultimo_aviso = 0;
 };
 #endif
 }  // namespace
