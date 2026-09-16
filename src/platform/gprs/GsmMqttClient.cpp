@@ -155,8 +155,9 @@ bool GsmMqttClient::begin(const MqttSessionConfig& cfg) {
 }
 
 void GsmMqttClient::end() {
-    if (_cliente.connected()) _cliente.disconnect();
+    if (_conectado) _cliente.disconnect();
     _estava_conectado = false;   // desligamento pedido, nao queda
+    _conectado        = false;
     _configurado = false;
     if (g_instancia == this) g_instancia = nullptr;
 }
@@ -173,7 +174,19 @@ void GsmMqttClient::reserveTopic(const char* topic) {
 }
 
 bool GsmMqttClient::connected() const {
-    return const_cast<PubSubClient&>(_cliente).connected();
+    // Um bool, e nunca uma consulta ao modem.
+    //
+    // O PubSubClient::connected() desce ate o TinyGsmClient, cujo available()
+    // manda AT+CIPRXGET e AT+CIPSTATUS pela UART. Chamado de outra task - no
+    // projeto, o Core 0 perguntando se o MQTT estava de pe -, isso colocava dois
+    // dialogos AT na mesma UART ao mesmo tempo. Uma resposta embaralhada fazia o
+    // PubSubClient concluir que o TCP tinha caido e mandar AT+CIPCLOSE num
+    // socket vivo: a sessao caia em estado -3 com o modem ainda em CONNECTED, em
+    // momentos que pareciam aleatorios - eram as colisoes. Nos logs, o Core 0
+    // chegava a anunciar "MQTT fora" antes da propria task do modem perceber.
+    //
+    // Quem consulta o modem e so o loop(), uma vez por volta.
+    return _conectado;
 }
 
 bool GsmMqttClient::conectar() {
@@ -219,14 +232,15 @@ bool GsmMqttClient::conectar() {
 
     _link.reportMqttConnected();
     _estava_conectado = true;
+    _conectado        = true;
     FWUP_LOGI("mqtt", "conectado a %s:%u", _cfg.host, _cfg.port);
 
-    // Sessao limpa: o broker nao guarda assinatura nenhuma entre conexoes.
-    for (uint8_t i = 0; i < _n_assinaturas; i++) {
-        if (!_cliente.subscribe(_assinaturas[i], 1)) {
-            FWUP_LOGW("mqtt", "falha ao reassinar %s", _assinaturas[i]);
-        }
-    }
+    // As assinaturas NAO sao refeitas aqui. O FirmwareUpdater ja as refaz na
+    // transicao para conectado (applySubscriptions), e fazer nos dois lugares
+    // mandava dois SUBSCRIBE por topico a cada reconexao. Cada SUBSCRIBE faz o
+    // broker reentregar o retido: os 3 KB de waypoints chegavam duas vezes, em
+    // 2G, no instante mais fragil da sessao - visto no log como dois
+    // "wp uuid match" com 1,4 s de diferenca.
 
     return true;
 }
@@ -234,8 +248,11 @@ bool GsmMqttClient::conectar() {
 void GsmMqttClient::loop(uint32_t now) {
     if (!_configurado || _suspenso) return;
 
-    if (_cliente.connected()) {
-        _cliente.loop();     // fora de qualquer condicao: e o keepalive
+    // A unica consulta ao modem sobre a sessao. PubSubClient::loop() ja
+    // comeca por connected(), serve o keepalive e devolve se a sessao segue de
+    // pe - chamar connected() antes dele so repetia o AT.
+    _conectado = _cliente.loop();
+    if (_conectado) {
         _falhas = 0;
         _estava_conectado = true;
         return;
@@ -272,14 +289,18 @@ void GsmMqttClient::loop(uint32_t now) {
 
     const uint32_t espera = kBackoffMs[_falhas < 4 ? _falhas : 3];
     if (_falhas < 4) _falhas++;
-    _proxima_tentativa = now + espera;
+    // millis(), e nao now: now foi lido antes de conectar(), que bloqueia ate o
+    // prazo do TCP. Somado a um now de 12 s atras, o backoff ja nascia vencido e
+    // a tentativa seguinte saia na hora.
+    _proxima_tentativa = millis() + espera;
 }
 
 void GsmMqttClient::suspend() {
     if (_suspenso) return;
     _suspenso = true;
     _estava_conectado = false;   // HTTP pediu o link: desconexao de proposito
-    if (_cliente.connected()) _cliente.disconnect();
+    if (_conectado) _cliente.disconnect();
+    _conectado = false;
     FWUP_LOGD("mqtt", "sessao suspensa: o link foi para o HTTP");
 }
 
@@ -302,14 +323,17 @@ bool GsmMqttClient::subscribe(const char* topic, uint8_t qos) {
         _n_assinaturas++;
     }
 
-    if (!_cliente.connected()) return false;
+    // O proprio PubSubClient confere a conexao por dentro; conferir aqui com
+    // _cliente.connected() era um AT a mais por chamada.
+    if (!_conectado) return false;
     return _cliente.subscribe(topic, qos > 1 ? 1 : qos);
 }
 
 bool GsmMqttClient::publish(const char* topic, const uint8_t* payload, size_t len,
                             uint8_t qos, bool retain) {
     (void)qos;   // ver maxPublishQos(): PubSubClient publica sempre em QoS 0
-    if (!_cliente.connected() || topic == nullptr) return false;
+    // Idem: um AT+CIPRXGET/CIPSTATUS a menos por publish.
+    if (!_conectado || topic == nullptr) return false;
     return _cliente.publish(topic, payload, len, retain);
 }
 

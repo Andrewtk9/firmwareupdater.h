@@ -116,9 +116,14 @@ private:
     uint32_t _proxima_tentativa = 0;
     uint8_t  _falhas = 0;
 
-    // Separa "a sessao caiu" de "nao conseguiu abrir": a queda manda o link
-    // refazer o PDP na hora, sem tentar TCP em cima do contexto velho.
+    // Separa "a sessao caiu" de "nao conseguiu abrir": a queda e anotada no
+    // link e a reconexao comeca no mesmo PDP (ver GsmLink::reportMqttSessionLost).
     bool _estava_conectado = false;
+
+    // Estado da sessao como a ultima volta do loop() o viu. E o que connected()
+    // devolve. So loop(), conectar(), suspend() e end() escrevem, todos na task
+    // que chama loop() - a dona da UART do modem. Qualquer outra task apenas le.
+    volatile bool _conectado = false;
 
     // PDP em que a ultima tentativa de TCP foi feita (ver GsmLink::pdpSeq).
     uint32_t _pdp_da_tentativa = 0;
