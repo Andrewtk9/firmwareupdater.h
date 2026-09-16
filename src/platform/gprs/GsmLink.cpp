@@ -137,6 +137,13 @@ bool GsmLink::begin(const GprsConfig& cfg) {
     _cfg = cfg;
 
     static HardwareSerial porta(1);
+    // Antes do begin(), senao nao vale. O padrao do core e 256 bytes, e o modem
+    // e quem manda as maiores rajadas do aparelho: o retido de waypoints tem
+    // 3 KB, e cada AT+CIPRXGET=2 devolve ate TINY_GSM_RX_BUFFER bytes de uma vez.
+    // Com a task do modem ocupada, ou preemptada pela do GPS, o que nao coube era
+    // descartado pelo driver - e uma resposta AT pela metade dessincroniza o
+    // TinyGSM. O proprio projeto ja usa 2048 no GPS e 8192 na UART das cameras.
+    porta.setRxBufferSize(2048);
     porta.begin(cfg.baud, SERIAL_8N1, cfg.pin_rx, cfg.pin_tx);
     _serial = &porta;
 
@@ -414,6 +421,88 @@ void GsmLink::reportMqttSessionLost(uint32_t now) {
 void GsmLink::reportMqttConnected() {
     _mqtt_falhas_seguidas = 0;
     _resets_modem         = 0;
+}
+
+GsmLink::EstadoSocket GsmLink::estadoSocketMqtt(uint32_t prazo_ms) {
+    if (_modem == nullptr) return EstadoSocket::SemResposta;
+
+    _modem->sendAT(GF("+CIPSTATUS="), _cfg.mux_mqtt);
+    // O estado vem entre aspas no fim da linha
+    //     +CIPSTATUS: <n>,<bearer>,"TCP","<ip>","<porta>","<estado>"
+    // Os outros estados - INITIAL, CLOSED, CLOSING, REMOTE CLOSING - chegam aqui
+    // como o OK que fecha a resposta sem nenhum dos dois primeiros.
+    const int8_t r = _modem->waitResponse(prazo_ms, GF("\"CONNECTED\""), GF("\"CONNECTING\""),
+                                          GF("OK\r\n"), GF("ERROR\r\n"));
+    if (r == 1 || r == 2) _modem->waitResponse(1000L);   // o OK que fecha a resposta
+
+    switch (r) {
+        case 1:  return EstadoSocket::Conectado;
+        case 2:  return EstadoSocket::Abrindo;
+        case 3:
+        case 4:  return EstadoSocket::Outro;
+        default: return EstadoSocket::SemResposta;
+    }
+}
+
+size_t GsmLink::enviarMqtt(const uint8_t* buf, size_t len) {
+    if (_modem == nullptr || buf == nullptr || len == 0) return 0;
+
+    // O CIPSEND do TinyGSM espera 1 s pelo prompt ">" e 1 s pelo DATA ACCEPT.
+    // Em 2G, com o modem ocupado, os dois estouram - e o do prompt estourar e
+    // grave: o TinyGSM desiste sem escrever nada, mas o modem ja aceitou o
+    // CIPSEND e segue esperando os bytes. O proximo comando AT vira conteudo do
+    // pacote MQTT, o broker recebe um pacote malformado e fecha a conexao: o
+    // REMOTE CLOSING dos traces. Num deles aparece literalmente "> +CIPSTATUS=0",
+    // um comando saindo logo depois do prompt.
+    //
+    // Prazos daqui pelo que o manual da SIMCom e os relatos de campo indicam
+    // para 2G congestionado.
+    constexpr uint32_t kPromptMs = 5000;
+    constexpr uint32_t kAceiteMs = 10000;
+
+    _modem->sendAT(GF("+CIPSEND="), _cfg.mux_mqtt, ',', static_cast<uint16_t>(len));
+    const int8_t prompt = _modem->waitResponse(kPromptMs, GF(">"), GF("ERROR\r\n"));
+
+    // Recusado - o socket ja nao existe. Nada ficou pendente no modem.
+    if (prompt == 2) return 0;
+
+    if (prompt != 1) {
+        // Nem prompt nem recusa: nao ha como saber se o modem aceitou o CIPSEND.
+        // Se aceitou, vai consumir os proximos len bytes como dado; se nao, eles
+        // caem no interpretador de comandos. Bytes nulos servem aos dois casos:
+        // completam um envio pendente sem que nenhum AT vire dado, e nao formam
+        // comando nenhum se o modem nao estava esperando. A sessao fica
+        // comprometida de qualquer jeito e cai pelo caminho normal; o que se evita
+        // e o modem dessincronizado junto com ela.
+        static const uint8_t kNulos[64] = {};
+        for (size_t falta = len; falta > 0;) {
+            const size_t n = (falta < sizeof(kNulos)) ? falta : sizeof(kNulos);
+            _modem->stream.write(kNulos, n);
+            falta -= n;
+        }
+        _modem->stream.flush();
+        _modem->waitResponse(3000L, GF("DATA ACCEPT:"), GF("ERROR\r\n"));
+        FWUP_LOGW("gprs", "CIPSEND de %u bytes sem prompt em %lu ms; envio neutralizado com bytes nulos",
+                  (unsigned)len, (unsigned long)kPromptMs);
+        return 0;
+    }
+
+    _modem->stream.write(buf, len);
+    _modem->stream.flush();
+
+    const int8_t aceite = _modem->waitResponse(kAceiteMs, GF("DATA ACCEPT:"), GF("ERROR\r\n"),
+                                               GF("SEND FAIL"), GF("CLOSED\r\n"));
+    if (aceite != 1) {
+        FWUP_LOGW("gprs", "CIPSEND de %u bytes sem DATA ACCEPT em %lu ms (resposta %d)",
+                  (unsigned)len, (unsigned long)kAceiteMs, (int)aceite);
+        return 0;
+    }
+
+    // "DATA ACCEPT:<mux>,<bytes>"
+    String resto;
+    if (_modem->waitResponse(2000L, resto, GF("\r\n")) != 1) return 0;
+    const long aceitos = resto.substring(resto.indexOf(',') + 1).toInt();
+    return (aceitos > 0) ? static_cast<size_t>(aceitos) : 0;
 }
 
 void GsmLink::drenarUart() {

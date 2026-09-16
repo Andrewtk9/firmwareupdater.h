@@ -66,6 +66,16 @@ public:
     // The MQTT mux, held by the session for as long as it lives.
     TinyGsmClient* mqttClient() { return &_mqtt; }
 
+    // Estado do socket do MQTT segundo o proprio modem (AT+CIPSTATUS=<mux>), com
+    // prazo folgado. O TinyGSM faz a mesma consulta, mas espera 1 s e, se a
+    // resposta atrasa, conclui que o socket fechou. So na task dona da UART.
+    enum class EstadoSocket : uint8_t { Conectado, Abrindo, Outro, SemResposta };
+    EstadoSocket estadoSocketMqtt(uint32_t prazo_ms = 3000);
+
+    // AT+CIPSEND no mux do MQTT com os prazos que um enlace 2G pede. Devolve
+    // quantos bytes o modem aceitou. Ver o comentario em GsmLink.cpp.
+    size_t enviarMqtt(const uint8_t* buf, size_t len);
+
     int16_t rssiDbm();
 
     // Identidade do modem e do chip SIM.
