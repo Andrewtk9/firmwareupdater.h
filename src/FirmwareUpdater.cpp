@@ -56,7 +56,11 @@ constexpr uint32_t kProvisionRetryMs   = 15000;
 constexpr uint32_t kMqttRetryMs        = 5000;
 constexpr uint32_t kConfirmRetryMs     = 10000;
 constexpr size_t   kJsonScratch        = 1024;
-constexpr size_t   kPingScratch        = 768;
+// Um projeto que estende o ping (onPingExtend) escreve os campos dele aqui
+// dentro. 768 bastava para a secao 6 da especificacao e pouco mais; com os
+// campos de aplicacao a margem ficava apertada, e estourar significa ping
+// nenhum. Sao 256 bytes de pilha na task que chama loop().
+constexpr size_t   kPingScratch        = 1024;
 constexpr uint32_t kOtaChunkBuffer     = 1024;
 
 bool wifiUp() {
@@ -1097,6 +1101,12 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
     const bool dual = (d.cfg.link_mode == LinkMode::Both);
     if (d.ping_builder.build(s, dual, d.cfg.ping_strict, out, sizeof(out)) !=
         CodecError::Ok) {
+        // Sem este aviso o ping some calado, e o ping e justamente o que diz
+        // que o aparelho esta vivo: o servidor o daria por offline sem que
+        // nada no log explicasse. Quem estende o payload precisa saber que
+        // passou do buffer.
+        FWUP_LOGW("ping", "payload nao coube em %u bytes; ping nao enviado",
+                  (unsigned)sizeof(out));
         return;
     }
 

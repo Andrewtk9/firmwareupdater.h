@@ -41,11 +41,40 @@ public:
     void releaseHttp();
     bool httpBusy() const { return _http_leased; }
 
+    // Escada de recuperacao, alimentada pela sessao MQTT.
+    //
+    // Com o PDP de pe o link nao percebe sozinho uma pilha TCP travada no
+    // modem: CGATT continua 1 e o IP continua la, mas nenhum socket abre. So
+    // quem tenta abrir sabe. A sessao conta aqui cada falha de TRANSPORTE
+    // seguida (recusa do broker nao entra) e o link escala: refaz o PDP e, se
+    // nao bastar, reinicia o modem. O primeiro sucesso zera a escada.
+    void reportMqttTransportFailure(uint32_t now);
+    void reportMqttConnected();
+
+    // A sessao estava de pe e caiu. Nos logs de campo o TCP nunca mais abriu em
+    // cima do mesmo PDP depois disso, entao o link refaz o PDP na hora.
+    void reportMqttSessionLost(uint32_t now);
+
+    // Muda a cada PDP que sobe. A sessao usa isso para saber se e a primeira
+    // tentativa em cima deste contexto - a primeira merece um prazo maior,
+    // porque nela cabe a resolucao de nome, que em 2G e lenta.
+    uint32_t pdpSeq() const { return _pdp_seq; }
+
     // A client bound to the HTTP mux. Only valid while the lease is held.
     TinyGsmClient* httpClient() { return _http_leased ? &_http : nullptr; }
 
     // The MQTT mux, held by the session for as long as it lives.
     TinyGsmClient* mqttClient() { return &_mqtt; }
+
+    // Estado do socket do MQTT segundo o proprio modem (AT+CIPSTATUS=<mux>), com
+    // prazo folgado. O TinyGSM faz a mesma consulta, mas espera 1 s e, se a
+    // resposta atrasa, conclui que o socket fechou. So na task dona da UART.
+    enum class EstadoSocket : uint8_t { Conectado, Abrindo, Outro, SemResposta };
+    EstadoSocket estadoSocketMqtt(uint32_t prazo_ms = 3000);
+
+    // AT+CIPSEND no mux do MQTT com os prazos que um enlace 2G pede. Devolve
+    // quantos bytes o modem aceitou. Ver o comentario em GsmLink.cpp.
+    size_t enviarMqtt(const uint8_t* buf, size_t len);
 
     int16_t rssiDbm();
 
@@ -76,6 +105,15 @@ private:
 
     void power(bool on);
     void fail(const char* why, uint32_t now);
+    void resetModem(const char* motivo);
+    void derrubarPdp();
+
+    // Le e joga fora o que sobrou na UART. Resposta atrasada, URC desconhecido
+    // ou aviso de boot do modem ficam no buffer e deslocam a leitura seguinte:
+    // o TinyGSM passa a ler a resposta do comando anterior. Isso nao se
+    // conserta sozinho, sobrevive ao reset do modem, e era o que obrigava a
+    // reiniciar a placa.
+    void drenarUart();
 
     GprsConfig _cfg;
     HardwareSerial* _serial = nullptr;
@@ -93,6 +131,18 @@ private:
 
     uint32_t _last_health_ms      = 0;
     bool     _mqtt_paused_by_fail = false;
+
+    // Ver reportMqttTransportFailure().
+    uint8_t _mqtt_falhas_seguidas = 0;
+    uint8_t _resets_modem         = 0;
+    bool    _refazer_pdp          = false;  // proximo Attaching derruba o PDP e pede outro
+
+    // Recuperacao portada da v1 (ver GsmLink.cpp).
+    uint32_t _settle_ms    = 0;      // 0 = boot_settle_ms; depois de reset, curto
+    uint32_t _net_check_ms = 0;      // ultima consulta de CREG e sinal
+    uint32_t _ip_anterior  = 0;      // IP do ultimo PDP que ficou de pe
+    uint32_t _pdp_seq      = 0;      // incrementa a cada PDP que sobe
+    bool     _comparar_ip  = false;  // PDP refeito de proposito: o IP tem de mudar
 
     Gate  _pause  = nullptr;
     Gate  _resume = nullptr;
