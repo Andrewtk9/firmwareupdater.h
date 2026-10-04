@@ -93,6 +93,11 @@ public:
     SleepBlock sleepBlock() const;
     bool       canSleep() const;
 
+    // Owner task only. Refuses active OTA/provisioning/HTTP and boards without
+    // a power-enable pin. loop() performs no network work while suspended.
+    bool suspendGprs();
+    bool resumeGprs();
+
     // Qual link esta carregando trafego agora, e se ha algum.
     //
     // Nao e a mesma pergunta que mqttConnected(): um projeto pode precisar

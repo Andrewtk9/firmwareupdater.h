@@ -99,6 +99,7 @@ void logNetwork() {
 }  // namespace
 
 struct FirmwareUpdater::Impl {
+    bool gprs_suspended = false;
     Config          cfg;
     Esp32Nvs        nvs;
     Esp32HttpClient http_wifi;
@@ -1124,7 +1125,7 @@ static void pingStep(FirmwareUpdater::Impl& d, uint32_t now) {
 
 void FirmwareUpdater::loop() {
     Impl& d = *_impl;
-    if (d.store == nullptr) return;
+    if (d.store == nullptr || d.gprs_suspended) return;
 
     const uint32_t now = millis();
     d.clock.tick(now);
@@ -1201,6 +1202,34 @@ SleepBlock FirmwareUpdater::sleepBlock() const {
 
 bool FirmwareUpdater::canSleep() const {
     return sleepBlock() == SleepBlock::None;
+}
+
+bool FirmwareUpdater::suspendGprs() {
+#if defined(FWUP_ENABLE_GPRS)
+    Impl& d = *_impl;
+    if (d.gprs_suspended) return true;
+    if (!d.store || d.cfg.link_mode != LinkMode::Gprs ||
+        d.cfg.gprs.pin_power_en < 0 || !canSleep() || d.gsm.httpBusy()) return false;
+    d.mqtt_gsm.suspend();
+    if (!d.gsm.suspendPower()) { d.mqtt_gsm.resume(); return false; }
+    d.gprs_suspended = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool FirmwareUpdater::resumeGprs() {
+#if defined(FWUP_ENABLE_GPRS)
+    Impl& d = *_impl;
+    if (!d.gprs_suspended) return true;
+    if (!d.gsm.resumePower()) return false;
+    d.mqtt_gsm.resume();
+    d.gprs_suspended = false;
+    return true;
+#else
+    return false;
+#endif
 }
 
 // ------------------------------------------------------------------ mqtt ---

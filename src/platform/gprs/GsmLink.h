@@ -27,6 +27,8 @@ public:
 
     bool begin(const GprsConfig& cfg);
     void loop(uint32_t now);
+    bool suspendPower();
+    bool resumePower();
 
     // PDP context active and usable.
     bool up() const { return _state == State::Ready; }

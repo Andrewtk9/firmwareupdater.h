@@ -173,6 +173,31 @@ void GsmLink::setMqttGate(Gate pause, Gate resume, void* ctx) {
     _gate_ctx = ctx;
 }
 
+bool GsmLink::suspendPower() {
+    if (_cfg.pin_power_en < 0 || _http_leased || !_serial || !_modem) return false;
+    if (_state == State::Off) return true;
+    // Caller has suspended MQTT in the same task. No competing AT consumer.
+    _modem->sendAT("+CPOWD=1");
+    _modem->waitResponse(5000L, "NORMAL POWER DOWN");
+    _serial->end();
+    pinMode(_cfg.pin_tx, INPUT);
+    pinMode(_cfg.pin_rx, INPUT);
+    power(false);
+    _state = State::Off;
+    _http_leased = false;
+    return true;
+}
+
+bool GsmLink::resumePower() {
+    if (_state != State::Off) return true;
+    if (!_serial || !_modem || _cfg.pin_power_en < 0) return false;
+    _failures = _mqtt_falhas_seguidas = _resets_modem = 0;
+    _mqtt_paused_by_fail = _refazer_pdp = _comparar_ip = false;
+    _next_try = _settle_ms = _net_check_ms = _ip_anterior = 0;
+    // Rebind clients to clear TinyGSM socket bookkeeping from the old boot.
+    return begin(_cfg);
+}
+
 void GsmLink::power(bool on) {
     if (_cfg.pin_power_en >= 0) {
         pinMode(_cfg.pin_power_en, OUTPUT);
