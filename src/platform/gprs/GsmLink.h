@@ -142,6 +142,7 @@ private:
     // Recuperacao portada da v1 (ver GsmLink.cpp).
     uint32_t _settle_ms    = 0;      // 0 = boot_settle_ms; depois de reset, curto
     uint32_t _net_check_ms = 0;      // ultima consulta de CREG e sinal
+    uint32_t _net_log_ms   = 0;      // ultimo diagnostico durante a busca
     uint32_t _ip_anterior  = 0;      // IP do ultimo PDP que ficou de pe
     uint32_t _pdp_seq      = 0;      // incrementa a cada PDP que sobe
     bool     _comparar_ip  = false;  // PDP refeito de proposito: o IP tem de mudar

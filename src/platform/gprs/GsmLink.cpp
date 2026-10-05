@@ -8,18 +8,16 @@ namespace campodata {
 
 namespace {
 constexpr uint32_t kAtProbeMs   = 1000;
-constexpr uint32_t kNetworkMs   = 60000;
+constexpr uint32_t kNetworkMs   = 300000;
 constexpr uint32_t kAttachMs    = 25000;
 constexpr uint32_t kBackoffMs[] = {2000, 5000, 15000, 30000};
 constexpr uint32_t kHealthMs    = 30000;
 
-// Recuperacao, portada da v1 e apertada no tempo: depois de uma queda o aparelho
-// nao pode ficar minutos fora do ar.
-//
-// Sem registro, CREG e sinal sao consultados a cada kNetCheckMs. CREG=3 reinicia
-// na hora; sinal bom sem registro por kNetSinalBomMs tambem (v1, Blocos 70 e 75).
+// A operadora pode alternar CREG=0/2/3 antes de aceitar o registro. O teste
+// isolado registrou quando o radio teve tempo sem resets; nao interromper a
+// busca por um CREG transitorio nem por CSQ bom.
 constexpr uint32_t kNetCheckMs    = 3000;
-constexpr uint32_t kNetSinalBomMs = 20000;
+constexpr uint32_t kNetLogMs      = 30000;
 
 // Depois de um reset por AT o modem responde em 2-3 s. O boot_settle_ms e para
 // o arranque frio, com a alimentacao acabando de subir.
@@ -269,6 +267,7 @@ void GsmLink::loop(uint32_t now) {
             _state        = State::Network;
             _since        = now;
             _net_check_ms = now;
+            _net_log_ms   = now;
             FWUP_LOGI("gprs", "aguardando registro na rede");
             break;
 
@@ -285,24 +284,15 @@ void GsmLink::loop(uint32_t now) {
             const uint32_t decorrido = now - _since;
             const int      creg      = static_cast<int>(_modem->getRegistrationStatus());
             const int      csq       = _modem->getSignalQuality();
-            const bool     sinal_bom = (csq >= 15 && csq != 99);   // 99 = desconhecido
-
-            // v1, Bloco 70: registro NEGADO. O modem nao tenta de novo sozinho, e
-            // esperar a janela so gastava tempo.
-            if (creg == 3) {
-                resetModem("registro negado pela operadora (CREG=3)");
-                return;
+            if (now - _net_log_ms >= kNetLogMs) {
+                _net_log_ms = now;
+                FWUP_LOGI("gprs", "aguardando rede: CREG=%d sinal=%d/31 ha %lu s",
+                          creg, csq, (unsigned long)(decorrido / 1000));
             }
-            // v1, Bloco 75: com sinal a rede esta ali; sem registro, quem travou
-            // foi o modem. Em campo ele ficou 5 min assim, com sinal 29/31.
-            if (sinal_bom && decorrido >= kNetSinalBomMs) {
-                FWUP_LOGW("gprs", "sinal %d/31 e sem registro ha %lu s", csq,
-                          (unsigned long)(decorrido / 1000));
-                resetModem("modem preso com sinal bom");
-                return;
-            }
-            if (decorrido > kNetworkMs) {
-                resetModem("sem registro na rede");
+            if (decorrido >= kNetworkMs) {
+                FWUP_LOGW("gprs", "sem registro apos %lu s: CREG=%d sinal=%d/31",
+                          (unsigned long)(decorrido / 1000), creg, csq);
+                resetModem("prazo de registro esgotado");
                 return;
             }
             break;
